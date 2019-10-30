@@ -225,9 +225,10 @@ impl Network {
     pub fn remove_connection(&self, peer_id: &str) -> Result<(), ConnectionError> {
         if let Some(mesh_id) = rwlock_write_unwrap!(self.peers).remove(peer_id) {
             let mut connection = self.mesh.remove(mesh_id)?;
-            connection.disconnect().map_err(|_| {
-                ConnectionError::RemoveError(format!("unable to disconnect from {}", peer_id))
-            })?;
+            match connection.disconnect(){
+                Ok(_) => (),
+                Err(err) => warn!("Unable to disconnect from {}: {:?}", peer_id, err)
+            }
         }
 
         Ok(())
@@ -473,6 +474,6 @@ pub mod tests {
         assert_eq!(heartbeat_bytes, message.payload());
 
         //remove connections
-        network_one.remove_connection("123").expect();
+        network_one.remove_connection("123").expect("Removing connection failed");
     }
 }

@@ -38,6 +38,47 @@ services:
             -vv
       "
 
+  splinterd-node-1:
+    image: splinterd-node
+    expose:
+      - 8080
+      - 8043
+      - 8945
+    ports:
+      - 8080:8080
+    volumes:
+      - ./splinterd/sample_configs:/configs
+      - ./splinterd/sample_node_registries:/node_registries
+    build:
+      context: .
+      dockerfile: splinterd/Dockerfile
+    entrypoint: |
+      bash -c "
+        splinterd \
+            --generate-certs \
+            -c ./configs/splinterd-node-1-docker.toml \
+            --registry-file ./node_registries/nodes.yaml \
+            -vv
+      "
+
+  splinterd-node-bad:
+    image: splinterd-node
+    expose:
+      - 8080
+      - 8043
+      - 8945
+    ports:
+      - 8080:8080
+    volumes:
+      - ./splinterd/sample_configs:/configs
+      - ./splinterd/sample_node_registries:/node_registries
+    build:
+      context: .
+      dockerfile: splinterd/Dockerfile
+    entrypoint: "bash -c \"\
+      tail -f /dev/null \
+      \""
+
   openapi-client:
       image: openapi-client
       container_name: openapi-client
