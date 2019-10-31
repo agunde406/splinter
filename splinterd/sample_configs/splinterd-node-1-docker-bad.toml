@@ -13,17 +13,17 @@
 # limitations under the License.
 # ------------------------------------------------------------------------------
 
-node_id = "012"
+node_id = "bad"
 
 # Endpoint used for service to daemon communication.
-service_endpoint = "127.0.0.1:8043"
+service_endpoint = "127.0.0.1:8047"
 
 # Endpoint used for daemon to daemon communication.
-network_endpoint = "127.0.0.1:8044"
+network_endpoint = "127.0.0.1:8048"
 
 # A list of splinter nodes the daemon will automatically
 # connect to on start up.
-peers = ["tls://splinterd-node-0:8046"]
+peers = ["tls://splinterd-node-0:8044"]
 
 # The type of storage that should be used to store circuit state. Option are
 # currently "yaml" or "memory"
@@ -33,4 +33,4 @@ storage = "memory"
 transport = "tls"
 
 # Rest api address.
-bind = "0.0.0.0:8080"
+bind = "0.0.0.0:8081"

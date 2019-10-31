@@ -20,6 +20,7 @@ services:
     expose:
       - 8080
       - 8043
+      - 8044
       - 8945
     ports:
       - 8080:8080
@@ -35,17 +36,24 @@ services:
             --generate-certs \
             -c ./configs/splinterd-node-0-docker.toml \
             --registry-file ./node_registries/nodes.yaml \
-            -vv
+            -vv   --network-endpoint 0.0.0.0:8044 \
       "
+
+      # splinterd \
+      #     --generate-certs \
+      #     -c ./configs/splinterd-node-1-docker.toml \
+      #     --registry-file ./node_registries/nodes.yaml \
+      #     -vv   --network-endpoint 0.0.0.0:8048 \
 
   splinterd-node-1:
     image: splinterd-node
     expose:
       - 8080
-      - 8043
+      - 8045
+      - 8046
       - 8945
     ports:
-      - 8080:8080
+      - 8081:8080
     volumes:
       - ./splinterd/sample_configs:/configs
       - ./splinterd/sample_node_registries:/node_registries
@@ -54,21 +62,23 @@ services:
       dockerfile: splinterd/Dockerfile
     entrypoint: |
       bash -c "
+        sleep 5 && \
         splinterd \
             --generate-certs \
             -c ./configs/splinterd-node-1-docker.toml \
             --registry-file ./node_registries/nodes.yaml \
-            -vv
+            -vv   --network-endpoint 0.0.0.0:8046 \
       "
 
   splinterd-node-bad:
     image: splinterd-node
     expose:
       - 8080
-      - 8043
+      - 8047
+      - 8048
       - 8945
     ports:
-      - 8080:8080
+      - 8082:8080
     volumes:
       - ./splinterd/sample_configs:/configs
       - ./splinterd/sample_node_registries:/node_registries
