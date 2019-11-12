@@ -13,7 +13,7 @@
 // limitations under the License.
 use super::{ConnectError, Connection, ListenError, Listener, Transport};
 
-type SendableTransport = Box<dyn Transport + Send>;
+type SendableTransport = Box<dyn Transport>;
 
 /// A MultiTransport holds a collection of transports, referenced by protocol.
 ///
@@ -56,6 +56,11 @@ impl Transport for MultiTransport {
             .find(|transport| transport.accepts(bind))
             .ok_or_else(|| ListenError::ProtocolError(format!("Unknown protocol \"{}\"", bind)))
             .and_then(|transport| transport.listen(bind))
+    }
+
+    fn clone_box(&self) -> Box<dyn Transport> {
+        let transports = self.transports.iter().map(|b| b.clone_box()).collect();
+        Box::new(Self::new(transports))
     }
 }
 

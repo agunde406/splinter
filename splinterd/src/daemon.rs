@@ -151,7 +151,7 @@ impl SplinterDaemon {
             service_listener,
         );
 
-        let peer_connector = PeerConnector::new(self.network.clone(), Box::new(transport));
+        let mut peer_connector = PeerConnector::new(self.network.clone(), Box::new(transport));
         let auth_manager = AuthorizationManager::new(self.network.clone(), self.node_id.clone());
 
         info!("Starting SpinterNode with id {}", self.node_id);

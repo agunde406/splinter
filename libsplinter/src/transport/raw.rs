@@ -24,7 +24,7 @@ use crate::transport::{
 
 const PROTOCOL_PREFIX: &str = "tcp://";
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct RawTransport {}
 
 impl Transport for RawTransport {
@@ -68,6 +68,10 @@ impl Transport for RawTransport {
         Ok(Box::new(RawListener {
             listener: TcpListener::bind(address)?,
         }))
+    }
+
+    fn clone_box(&self) -> Box<dyn Transport> {
+        Box::new(self.clone())
     }
 }
 
