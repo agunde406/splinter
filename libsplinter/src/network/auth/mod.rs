@@ -597,6 +597,10 @@ mod tests {
         ) -> Result<Box<dyn crate::transport::Listener>, crate::transport::ListenError> {
             unimplemented!()
         }
+
+        fn clone_box(&self) -> Box<dyn Transport> {
+            unimplemented!()
+        }
     }
 
     struct MockConnection;

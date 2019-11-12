@@ -96,7 +96,7 @@ pub struct SplinterDaemon {
 }
 
 impl SplinterDaemon {
-    pub fn start(&mut self, transport: Box<dyn Transport + Send>) -> Result<(), StartError> {
+    pub fn start(&mut self, transport: Box<dyn Transport>) -> Result<(), StartError> {
         let mut inproc_transport = InprocTransport::default();
         let mut transports = vec![transport, Box::new(inproc_transport.clone())];
 
@@ -151,7 +151,7 @@ impl SplinterDaemon {
             service_listener,
         );
 
-        let peer_connector = PeerConnector::new(self.network.clone(), Box::new(transport));
+        let mut peer_connector = PeerConnector::new(self.network.clone(), Box::new(transport));
         let auth_manager = AuthorizationManager::new(self.network.clone(), self.node_id.clone());
 
         info!("Starting SpinterNode with id {}", self.node_id);

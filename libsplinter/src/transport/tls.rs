@@ -33,6 +33,7 @@ use crate::transport::{
 
 const PROTOCOL_PREFIX: &str = "tls://";
 
+#[derive(Clone)]
 pub struct TlsTransport {
     connector: SslConnector,
     acceptor: SslAcceptor,
@@ -148,6 +149,10 @@ impl Transport for TlsTransport {
             listener: TcpListener::bind(address)?,
             acceptor: self.acceptor.clone(),
         }))
+    }
+
+    fn clone_box(&self) -> Box<dyn Transport> {
+        Box::new(self.clone())
     }
 }
 

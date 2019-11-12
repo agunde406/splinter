@@ -2806,6 +2806,10 @@ mod tests {
         ) -> Result<Box<dyn crate::transport::Listener>, crate::transport::ListenError> {
             panic!("MockConnectingTransport.listen unexpectedly called")
         }
+
+        fn clone_box(&self) -> Box<dyn Transport> {
+            unimplemented!()
+        }
     }
 
     struct MockConnection {

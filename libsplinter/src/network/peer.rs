@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 use std::fmt;
-use std::sync::{Arc, Mutex};
 
 use protobuf::Message;
 
@@ -76,30 +75,27 @@ impl fmt::Display for PeerConnectorError {
 
 #[derive(Clone)]
 pub struct PeerConnector {
-    transport: Arc<Mutex<Box<dyn Transport + Send>>>,
+    transport: Box<dyn Transport>,
     network: Network,
 }
 
 impl PeerConnector {
     pub fn new(network: Network, transport: Box<dyn Transport + Send>) -> PeerConnector {
-        Self {
-            network,
-            transport: Arc::new(Mutex::new(transport)),
-        }
+        Self { network, transport }
     }
 
-    pub fn connect_peer(&self, node_id: &str, endpoint: &str) -> Result<(), PeerConnectorError> {
-        let mut transport = self
-            .transport
-            .lock()
-            .map_err(|err| PeerConnectorError::PoisonedLock(err.to_string()))?;
-
+    pub fn connect_peer(
+        &mut self,
+        node_id: &str,
+        endpoint: &str,
+    ) -> Result<(), PeerConnectorError> {
         if self.network.get_peer_by_endpoint(endpoint).is_some() {
             return Ok(());
         }
 
         debug!("Connecting to {} at {}...", node_id, endpoint);
-        let connection = transport
+        let connection = self
+            .transport
             .connect(&endpoint)
             .map_err(|err| PeerConnectorError::connection_failed(node_id, format!("{:?}", err)))?;
         debug!(
@@ -129,16 +125,13 @@ impl PeerConnector {
         Ok(())
     }
 
-    pub fn connect_unidentified_peer(&self, endpoint: &str) -> Result<(), PeerConnectorError> {
-        let mut transport = self.transport.lock().map_err(|err| {
-            PeerConnectorError::PoisonedLock(format!("Unable to acquire transport lock: {}", err))
-        })?;
-
+    pub fn connect_unidentified_peer(&mut self, endpoint: &str) -> Result<(), PeerConnectorError> {
         if self.network.get_peer_by_endpoint(endpoint).is_some() {
             return Ok(());
         }
 
-        let connection = transport
+        let connection = self
+            .transport
             .connect(&endpoint)
             .map_err(|err| PeerConnectorError::connection_failed(endpoint, format!("{:?}", err)))?;
         debug!("Successfully connected to {}", connection.remote_endpoint());
@@ -201,7 +194,7 @@ mod tests {
         let transport =
             MockConnectingTransport::expect_connections(vec![Ok(Box::new(MockConnection))]);
 
-        let peer_connector = PeerConnector::new(network.clone(), Box::new(transport));
+        let mut peer_connector = PeerConnector::new(network.clone(), Box::new(transport));
 
         assert!(network.peer_ids().is_empty());
 
@@ -223,7 +216,7 @@ mod tests {
         let transport =
             MockConnectingTransport::expect_connections(vec![Ok(Box::new(MockConnection))]);
 
-        let peer_connector = PeerConnector::new(network.clone(), Box::new(transport));
+        let mut peer_connector = PeerConnector::new(network.clone(), Box::new(transport));
 
         assert!(network.peer_ids().is_empty());
 
@@ -254,7 +247,7 @@ mod tests {
         let transport =
             MockConnectingTransport::expect_connections(vec![Ok(Box::new(MockConnection))]);
 
-        let peer_connector = PeerConnector::new(network.clone(), Box::new(transport));
+        let mut peer_connector = PeerConnector::new(network.clone(), Box::new(transport));
 
         assert!(network.peer_ids().is_empty());
 
@@ -275,7 +268,7 @@ mod tests {
             ConnectError::ProtocolError("test error".into()),
         )]);
 
-        let peer_connector = PeerConnector::new(network.clone(), Box::new(transport));
+        let mut peer_connector = PeerConnector::new(network.clone(), Box::new(transport));
 
         assert!(network.peer_ids().is_empty());
 
@@ -293,7 +286,7 @@ mod tests {
             ConnectError::ProtocolError("test error".into()),
         )]);
 
-        let peer_connector = PeerConnector::new(network.clone(), Box::new(transport));
+        let mut peer_connector = PeerConnector::new(network.clone(), Box::new(transport));
 
         assert!(network.peer_ids().is_empty());
 
@@ -329,6 +322,10 @@ mod tests {
             &mut self,
             _: &str,
         ) -> Result<Box<dyn crate::transport::Listener>, crate::transport::ListenError> {
+            unimplemented!()
+        }
+
+        fn clone_box(&self) -> Box<dyn Transport> {
             unimplemented!()
         }
     }

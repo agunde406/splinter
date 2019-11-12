@@ -84,6 +84,10 @@ impl Transport for InprocTransport {
         self.incoming.lock().unwrap().insert(address.into(), tx);
         Ok(Box::new(InprocListener::new(address.into(), rx)))
     }
+
+    fn clone_box(&self) -> Box<dyn Transport> {
+        Box::new(self.clone())
+    }
 }
 
 pub struct InprocListener {

@@ -158,6 +158,7 @@ pub enum ZmqError {
     RouterThreadJoinError(String),
 }
 
+#[derive(Clone)]
 pub struct ZmqTransport {
     context: Context,
 }
@@ -207,6 +208,10 @@ impl Transport for ZmqTransport {
             format!("tcp://{}", subprotocol)
         };
         Ok(Box::new(ZmqListener::start(self.context.clone(), address)?))
+    }
+
+    fn clone_box(&self) -> Box<dyn Transport> {
+        Box::new(self.clone())
     }
 }
 
