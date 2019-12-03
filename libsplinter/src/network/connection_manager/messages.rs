@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crossbeam_channel::Sender;
+use std::sync::mpsc::Sender;
 
 use crate::network::connection_manager::error::ConnectionManagerError;
 

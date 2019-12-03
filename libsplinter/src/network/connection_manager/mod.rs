@@ -18,13 +18,13 @@ mod messages;
 use std;
 use std::collections::HashMap;
 use std::sync::{
+    mpsc::{channel, Sender, Receiver},
     atomic::{AtomicBool, Ordering},
     Arc, Mutex, MutexGuard,
 };
 use std::thread;
 use std::time::Duration;
 
-use crossbeam_channel::{bounded, unbounded, Receiver, Sender, TrySendError};
 pub use error::ConnectionManagerError;
 pub use messages::{CmMessage, CmNotification, CmPayload, CmRequest, CmResponse, CmResponseStatus};
 use protobuf::Message;
@@ -60,7 +60,7 @@ impl ConnectionManager {
     }
 
     pub fn start(&mut self) -> Result<Connector, ConnectionManagerError> {
-        let (sender, recv) = unbounded();
+        let (sender, recv) = channel();
         let connection_state = self.connection_state.clone();
 
         let join_handle = thread::Builder::new()
@@ -270,7 +270,7 @@ pub struct Connector {
 
 impl Connector {
     pub fn request_connection(&self, endpoint: &str) -> Result<CmResponse, ConnectionManagerError> {
-        let (sender, recv) = bounded(1);
+        let (sender, recv) = channel();
 
         let message = CmMessage::Request(CmRequest {
             sender,
@@ -279,14 +279,9 @@ impl Connector {
             },
         });
 
-        match self.sender.try_send(message) {
+        match self.sender.send(message) {
             Ok(()) => (),
-            Err(TrySendError::Full(_)) => {
-                return Err(ConnectionManagerError::SendTimeoutError(
-                    "Connection manager message queue is full".into(),
-                ))
-            }
-            Err(TrySendError::Disconnected(_)) => {
+            Err(_) => {
                 return Err(ConnectionManagerError::SendMessageError(
                     "The connection manager is no longer running".into(),
                 ))
@@ -299,8 +294,8 @@ impl Connector {
 
     pub fn subscribe(&self) -> Result<NotificationHandler, ConnectionManagerError> {
         let id = Uuid::new_v4().to_string();
-        let (send, recv) = unbounded();
-        match self.sender.try_send(CmMessage::Subscribe(id.clone(), send)) {
+        let (send, recv) = channel();
+        match self.sender.send(CmMessage::Subscribe(id.clone(), send)) {
             Ok(()) => Ok(NotificationHandler {
                 id,
                 recv,
