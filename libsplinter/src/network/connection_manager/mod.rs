@@ -13,19 +13,16 @@
 // limitations under the License.
 
 mod error;
+mod heartbeat_monitor;
 mod messages;
 
 use std;
 use std::collections::HashMap;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    mpsc::{channel, Receiver, Sender},
-    Arc,
-};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
-use std::time::Duration;
 
 pub use error::ConnectionManagerError;
+use heartbeat_monitor::{HbShutdownHandle, HeartbeatMonitor};
 pub use messages::{CmMessage, CmNotification, CmPayload, CmRequest, CmResponse, CmResponseStatus};
 use protobuf::Message;
 use uuid::Uuid;
@@ -47,8 +44,7 @@ pub struct ConnectionManager {
 impl ConnectionManager {
     pub fn new(mesh: Mesh, transport: Box<dyn Transport + Send>) -> Self {
         let connection_state = ConnectionState::new(mesh, transport);
-        let hb_monitor =
-            HeartbeatMonitor::new(DEFAULT_HEARTBEAT_INTERVAL);
+        let hb_monitor = HeartbeatMonitor::new(DEFAULT_HEARTBEAT_INTERVAL);
 
         Self {
             hb_monitor,
@@ -133,67 +129,6 @@ impl ConnectionManager {
     }
 }
 
-struct HeartbeatMonitor {
-    interval: u64,
-    join_handle: Option<thread::JoinHandle<()>>,
-    shutdown_handle: Option<HbShutdownHandle>,
-}
-
-impl HeartbeatMonitor {
-    fn new(interval: u64) -> Self {
-        Self {
-            interval,
-            join_handle: None,
-            shutdown_handle: None,
-        }
-    }
-
-    fn start(&mut self, cm_sender: Sender<CmMessage>) -> Result<(), ConnectionManagerError> {
-        if self.join_handle.is_some() {
-            return Ok(());
-        }
-
-        let running = Arc::new(AtomicBool::new(true));
-
-        let running_clone = running.clone();
-        let interval = self.interval;
-        let join_handle = thread::Builder::new()
-            .name("Heartbeat Monitor".into())
-            .spawn(move || {
-                info!("Starting heartbeat manager");
-
-                while running_clone.load(Ordering::SeqCst) {
-                    thread::sleep(Duration::from_secs(interval));
-                    if let Err(err) = cm_sender.send(CmMessage::SendHeartbeats) {
-                        error!("Connection manager has disconnected before shutting down heartbeat monitor {:?}", err);
-                        break;
-                    }
-                }
-            })?;
-
-        self.join_handle = Some(join_handle);
-        self.shutdown_handle = Some(HbShutdownHandle { running });
-
-        Ok(())
-    }
-
-    fn shutdown_handle(&self) -> Option<HbShutdownHandle> {
-        self.shutdown_handle.clone()
-    }
-
-    fn await_shutdown(self) {
-        let join_handle = if let Some(jh) = self.join_handle {
-            jh
-        } else {
-            return;
-        };
-
-        if let Err(err) = join_handle.join() {
-            error!("Failed to shutdown heartbeat monitor gracefully: {:?}", err);
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct Connector {
     sender: Sender<CmMessage>,
@@ -252,17 +187,6 @@ impl ShutdownHandle {
         if let Err(_) = self.sender.send(CmMessage::Shutdown) {
             warn!("Connection manager is no longer running");
         }
-    }
-}
-
-#[derive(Clone)]
-struct HbShutdownHandle {
-    running: Arc<AtomicBool>,
-}
-
-impl HbShutdownHandle {
-    pub fn shutdown(&self) {
-        self.running.store(false, Ordering::SeqCst)
     }
 }
 
