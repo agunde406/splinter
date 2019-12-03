@@ -21,7 +21,7 @@ pub enum CmMessage {
     Subscribe(String, Sender<Vec<CmNotification>>),
     UnSubscribe(String),
     Request(CmRequest),
-    HeartbeatNotifications(Vec<CmNotification>),
+    SendHeartbeats,
 }
 
 pub struct CmRequest {
