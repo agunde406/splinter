@@ -208,11 +208,11 @@ impl ShutdownHandle {
 pub struct NotificationHandler {
     id: String,
     sender: Sender<CmMessage>,
-    recv: Receiver<Vec<CmNotification>>,
+    recv: Receiver<CmNotification>,
 }
 
 impl NotificationHandler {
-    pub fn listen(&self) -> Result<Vec<CmNotification>, ConnectionManagerError> {
+    pub fn listen(&self) -> Result<CmNotification, ConnectionManagerError> {
         match self.recv.recv() {
             Ok(notifications) => Ok(notifications),
             Err(_) => Err(ConnectionManagerError::SendMessageError(
@@ -365,11 +365,11 @@ fn handle_request<T: MatrixLifeCycle, U: MatrixSender>(
 }
 
 fn notify_subscribers(
-    subscribers: &mut HashMap<String, Sender<Vec<CmNotification>>>,
-    notifications: Vec<CmNotification>,
+    subscribers: &mut HashMap<String, Sender<CmNotification>>,
+    notification: CmNotification,
 ) {
     for (id, sender) in subscribers.clone() {
-        if sender.send(notifications.clone()).is_err() {
+        if let Err(_) = sender.send(notification.clone()) {
             warn!("subscriber has dropped its connection to connection manager");
             subscribers.remove(&id);
         }
@@ -377,8 +377,8 @@ fn notify_subscribers(
 }
 
 fn send_heartbeats<T: MatrixLifeCycle, U: MatrixSender>(
-    state: &mut ConnectionState<T, U>,
-    subscribers: &mut HashMap<String, Sender<Vec<CmNotification>>>,
+    state: &mut ConnectionState<T,U>,
+    subscribers: &mut HashMap<String, Sender<CmNotification>>,
 ) {
     let heartbeat_message = match create_heartbeat() {
         Ok(h) => h,
@@ -387,7 +387,6 @@ fn send_heartbeats<T: MatrixLifeCycle, U: MatrixSender>(
             return;
         }
     };
-    let mut notifications = Vec::new();
 
     for (endpoint, metadata) in state.connection_metadata() {
         info!("Sending heartbeat to {}", endpoint);
@@ -400,30 +399,40 @@ fn send_heartbeats<T: MatrixLifeCycle, U: MatrixSender>(
                 err
             );
 
-            notifications.push(CmNotification::HeartbeatSendFail {
-                endpoint: endpoint.clone(),
-                message: format!("{:?}", err),
-            });
+            notify_subscribers(
+                subscribers,
+                CmNotification::HeartbeatSendFail {
+                    endpoint: endpoint.clone(),
+                    message: format!("{:?}", err),
+                },
+            );
 
             if let Err(err) = state.reconnect(&endpoint) {
                 error!("Connection reattempt failed: {:?}", err);
-                notifications.push(CmNotification::ReconnectAttemptFailed {
-                    endpoint: endpoint.clone(),
-                    message: format!("{:?}", err),
-                });
+                notify_subscribers(
+                    subscribers,
+                    CmNotification::ReconnectAttemptFailed {
+                        endpoint: endpoint.clone(),
+                        message: format!("{:?}", err),
+                    },
+                );
             } else {
-                notifications.push(CmNotification::ReconnectAttemptSuccess {
-                    endpoint: endpoint.clone(),
-                });
+                notify_subscribers(
+                    subscribers,
+                    CmNotification::ReconnectAttemptSuccess {
+                        endpoint: endpoint.clone(),
+                    },
+                );
             }
         } else {
-            notifications.push(CmNotification::HeartbeatSent {
-                endpoint: endpoint.clone(),
-            });
+            notify_subscribers(
+                subscribers,
+                CmNotification::HeartbeatSent {
+                    endpoint: endpoint.clone(),
+                },
+            );
         }
     }
-
-    notify_subscribers(subscribers, notifications);
 }
 
 fn create_heartbeat() -> Result<Vec<u8>, ConnectionManagerError> {
@@ -567,12 +576,14 @@ pub mod tests {
 
         let subscriber = connector.subscribe().unwrap();
 
-        let notifications = subscriber.listen().unwrap();
+        let notification = subscriber.listen().unwrap();
 
-        assert!(notifications.iter().any(|x| *x
-            == CmNotification::HeartbeatSent {
-                endpoint: "inproc://test".to_string(),
-            }));
+        assert!(
+            notification
+                == CmNotification::HeartbeatSent {
+                    endpoint: "inproc://test".to_string(),
+                }
+        );
 
         // Verify mesh received heartbeat
 
@@ -613,12 +624,14 @@ pub mod tests {
 
         let subscriber = connector.subscribe().unwrap();
 
-        let notifications = subscriber.listen().unwrap();
+        let notification = subscriber.listen().unwrap();
 
-        assert!(notifications.iter().any(|x| *x
-            == CmNotification::HeartbeatSent {
-                endpoint: "tcp://localhost:8080".to_string(),
-            }));
+        assert!(
+            notification
+                == CmNotification::HeartbeatSent {
+                    endpoint: "tcp://localhost:8080".to_string(),
+                }
+        );
 
         // Verify mesh received heartbeat
 
