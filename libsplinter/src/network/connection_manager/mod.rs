@@ -136,26 +136,15 @@ pub struct Connector {
 
 impl Connector {
     pub fn request_connection(&self, endpoint: &str) -> Result<CmResponse, ConnectionManagerError> {
-        let (sender, recv) = channel();
+        self.send_payload(CmPayload::AddConnection {
+            endpoint: endpoint.to_string(),
+        })
+    }
 
-        let message = CmMessage::Request(CmRequest {
-            sender,
-            payload: CmPayload::AddConnection {
-                endpoint: endpoint.to_string(),
-            },
-        });
-
-        match self.sender.send(message) {
-            Ok(()) => (),
-            Err(_) => {
-                return Err(ConnectionManagerError::SendMessageError(
-                    "The connection manager is no longer running".into(),
-                ))
-            }
-        };
-
-        recv.recv()
-            .map_err(|err| ConnectionManagerError::SendMessageError(format!("{:?}", err)))
+    pub fn remove_connection(&self, endpoint: &str) -> Result<CmResponse, ConnectionManagerError> {
+        self.send_payload(CmPayload::RemoveConnection {
+            endpoint: endpoint.to_string(),
+        })
     }
 
     pub fn subscribe(&self) -> Result<NotificationHandler, ConnectionManagerError> {
@@ -171,6 +160,24 @@ impl Connector {
                 "The connection manager is no longer running".into(),
             )),
         }
+    }
+
+    fn send_payload(&self, payload: CmPayload) -> Result<CmResponse, ConnectionManagerError> {
+        let (sender, recv) = channel();
+
+        let message = CmMessage::Request(CmRequest { sender, payload });
+
+        match self.sender.send(message) {
+            Ok(()) => (),
+            Err(_) => {
+                return Err(ConnectionManagerError::SendMessageError(
+                    "The connection manager is no longer running".into(),
+                ))
+            }
+        };
+
+        recv.recv()
+            .map_err(|err| ConnectionManagerError::SendMessageError(format!("{:?}", err)))
     }
 }
 
@@ -301,18 +308,33 @@ impl ConnectionState {
 }
 
 fn handle_request(req: CmRequest, state: &mut ConnectionState) {
-    let result = match req.payload {
-        CmPayload::AddConnection { ref endpoint } => state.add_connection(endpoint),
-    };
-
-    let response = match result {
-        Ok(()) => CmResponse::AddConnection {
-            status: CmResponseStatus::OK,
-            error_message: None,
-        },
-        Err(err) => CmResponse::AddConnection {
-            status: CmResponseStatus::Error,
-            error_message: Some(format!("{:?}", err)),
+    let response = match req.payload {
+        CmPayload::AddConnection { ref endpoint } => {
+            if let Err(err) = state.add_connection(endpoint) {
+                CmResponse::AddConnection {
+                    status: CmResponseStatus::Error,
+                    error_message: Some(format!("{:?}", err)),
+                }
+            } else {
+                CmResponse::AddConnection {
+                    status: CmResponseStatus::OK,
+                    error_message: None,
+                }
+            }
+        }
+        CmPayload::RemoveConnection { ref endpoint } => match state.remove_connection(endpoint) {
+            Ok(Some(_)) => CmResponse::RemoveConnection {
+                status: CmResponseStatus::OK,
+                error_message: None,
+            },
+            Ok(None) => CmResponse::RemoveConnection {
+                status: CmResponseStatus::ConnectionNotFound,
+                error_message: None,
+            },
+            Err(err) => CmResponse::RemoveConnection {
+                status: CmResponseStatus::Error,
+                error_message: Some(format!("{:?}", err)),
+            },
         },
     };
 
@@ -404,8 +426,8 @@ pub mod tests {
 
     #[test]
     fn test_connection_manager_startup_and_shutdown() {
-        let mut transport = Box::new(InprocTransport::default());
-        transport.listen("inproc://test").unwrap();
+        let mut transport = Box::new(RawTransport::default());
+        transport.listen("tcp://localhost:8080").unwrap();
         let mesh = Mesh::new(512, 128);
 
         let mut cm = ConnectionManager::new(mesh, transport);
@@ -416,8 +438,8 @@ pub mod tests {
 
     #[test]
     fn test_notification_handler_subscribe_unsubscribe() {
-        let mut transport = Box::new(InprocTransport::default());
-        transport.listen("inproc://test").unwrap();
+        let mut transport = Box::new(RawTransport::default());
+        transport.listen("tcp://localhost:8080").unwrap();
         let mesh = Mesh::new(512, 128);
 
         let mut cm = ConnectionManager::new(mesh, transport);
@@ -432,8 +454,8 @@ pub mod tests {
 
     #[test]
     fn test_add_connection_request() {
-        let mut transport = Box::new(InprocTransport::default());
-        let mut listener = transport.listen("inproc://test").unwrap();
+        let mut transport = Box::new(RawTransport::default());
+        let mut listener = transport.listen("tcp://localhost:8080").unwrap();
 
         thread::spawn(move || {
             listener.accept().unwrap();
@@ -443,7 +465,9 @@ pub mod tests {
         let mut cm = ConnectionManager::new(mesh, transport);
         let connector = cm.start().unwrap();
 
-        let response = connector.request_connection("inproc://test").unwrap();
+        let response = connector
+            .request_connection("tcp://localhost:8080")
+            .unwrap();
 
         assert_eq!(
             response,
@@ -459,8 +483,8 @@ pub mod tests {
     /// Test that adding the same connection twice is an idempotent operation
     #[test]
     fn test_mutiple_add_connection_requests() {
-        let mut transport = Box::new(InprocTransport::default());
-        let mut listener = transport.listen("inproc://test").unwrap();
+        let mut transport = Box::new(RawTransport::default());
+        let mut listener = transport.listen("tcp://localhost:8080").unwrap();
 
         thread::spawn(move || {
             listener.accept().unwrap();
@@ -470,7 +494,9 @@ pub mod tests {
         let mut cm = ConnectionManager::new(mesh, transport);
         let connector = cm.start().unwrap();
 
-        let response = connector.request_connection("inproc://test").unwrap();
+        let response = connector
+            .request_connection("tcp://localhost:8080")
+            .unwrap();
 
         assert_eq!(
             response,
@@ -480,7 +506,9 @@ pub mod tests {
             }
         );
 
-        let response = connector.request_connection("inproc://test").unwrap();
+        let response = connector
+            .request_connection("tcp://localhost:8080")
+            .unwrap();
         assert_eq!(
             response,
             CmResponse::AddConnection {
@@ -498,50 +526,6 @@ pub mod tests {
     /// to subscribers
     #[test]
     fn test_heartbeat_notifications() {
-        let mut transport = Box::new(InprocTransport::default());
-        let mut listener = transport.listen("inproc://test").unwrap();
-        let mesh = Mesh::new(512, 128);
-        let mesh_clone = mesh.clone();
-
-        thread::spawn(move || {
-            let conn = listener.accept().unwrap();
-            mesh_clone.add(conn).unwrap();
-        });
-
-        let mut cm = ConnectionManager::new(mesh.clone(), transport);
-        let connector = cm.start().unwrap();
-
-        let response = connector.request_connection("inproc://test").unwrap();
-
-        assert_eq!(
-            response,
-            CmResponse::AddConnection {
-                status: CmResponseStatus::OK,
-                error_message: None
-            }
-        );
-
-        let subscriber = connector.subscribe().unwrap();
-
-        let notifications = subscriber.listen().unwrap();
-
-        assert!(notifications.iter().any(|x| *x
-            == CmNotification::HeartbeatSent {
-                endpoint: "inproc://test".to_string(),
-            }));
-
-        // Verify mesh received heartbeat
-
-        let envelope = mesh.recv().unwrap();
-        let heartbeat: NetworkMessage = protobuf::parse_from_bytes(&envelope.payload()).unwrap();
-        assert_eq!(
-            heartbeat.get_message_type(),
-            NetworkMessageType::NETWORK_HEARTBEAT
-        );
-    }
-
-    #[test]
-    fn test_heartbeat_notifications_raw_tcp() {
         let mut transport = Box::new(RawTransport::default());
         let mut listener = transport.listen("tcp://localhost:8080").unwrap();
         let mesh = Mesh::new(512, 128);
@@ -583,6 +567,70 @@ pub mod tests {
         assert_eq!(
             heartbeat.get_message_type(),
             NetworkMessageType::NETWORK_HEARTBEAT
+        );
+    }
+
+    #[test]
+    fn test_remove_connection() {
+        let mut transport = Box::new(RawTransport::default());
+        let mut listener = transport.listen("tcp://localhost:8080").unwrap();
+        let mesh = Mesh::new(512, 128);
+        let mesh_clone = mesh.clone();
+
+        thread::spawn(move || {
+            let conn = listener.accept().unwrap();
+            mesh_clone.add(conn).unwrap();
+        });
+
+        let mut cm = ConnectionManager::new(mesh.clone(), transport);
+        let connector = cm.start().unwrap();
+
+        let add_response = connector
+            .request_connection("tcp://localhost:8080")
+            .unwrap();
+
+        assert_eq!(
+            add_response,
+            CmResponse::AddConnection {
+                status: CmResponseStatus::OK,
+                error_message: None
+            }
+        );
+
+        let remove_response = connector.remove_connection("tcp://localhost:8080").unwrap();
+
+        assert_eq!(
+            remove_response,
+            CmResponse::RemoveConnection {
+                status: CmResponseStatus::OK,
+                error_message: None
+            }
+        );
+    }
+
+    #[test]
+    fn test_remove_nonexistent_connection() {
+        let mut transport = Box::new(RawTransport::default());
+        let mut listener = transport.listen("tcp://localhost:8080").unwrap();
+        let mesh = Mesh::new(512, 128);
+        let mesh_clone = mesh.clone();
+
+        thread::spawn(move || {
+            let conn = listener.accept().unwrap();
+            mesh_clone.add(conn).unwrap();
+        });
+
+        let mut cm = ConnectionManager::new(mesh.clone(), transport);
+        let connector = cm.start().unwrap();
+
+        let remove_response = connector.remove_connection("tcp://localhost:8080").unwrap();
+
+        assert_eq!(
+            remove_response,
+            CmResponse::RemoveConnection {
+                status: CmResponseStatus::ConnectionNotFound,
+                error_message: None,
+            }
         );
     }
 }
