@@ -62,12 +62,8 @@ pub enum CmNotification {
         error: ConnectionManagerError,
         message: String,
     },
-    HeartbeatSent {
+    AttemptingReconnect {
         endpoint: String,
-    },
-    HeartbeatSendFail {
-        endpoint: String,
-        message: String,
     },
     ReconnectAttemptSuccess {
         endpoint: String,
