@@ -155,7 +155,7 @@ impl AdminService {
             .auth_inquisitor()
             .register_callback(Box::new(
                 move |peer_id: &str, state: PeerAuthorizationState| {
-                    auth_callback_shared
+                    let result = auth_callback_shared
                         .lock()
                         .map_err(|_| {
                             AuthorizationCallbackError(
@@ -163,6 +163,9 @@ impl AdminService {
                             )
                         })?
                         .on_authorization_change(peer_id, state);
+                    if let Err(err) = result {
+                        error!("{}", err);
+                    }
 
                     Ok(())
                 },
