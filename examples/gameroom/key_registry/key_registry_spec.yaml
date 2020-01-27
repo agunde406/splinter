@@ -23,3 +23,8 @@ bob:
   metadata:
     gameroom/first-name: bob
     gameroom/organization: Bubba Bakery
+gwen:
+  node_id: generic-node-000
+  metadata:
+    gameroom/first-name: gwen
+    gameroom/organization: Generic

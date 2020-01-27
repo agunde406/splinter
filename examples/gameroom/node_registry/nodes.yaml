@@ -23,3 +23,8 @@
   display_name: 'Acme - Node 1'
   metadata:
     organization: 'ACME Corporation'
+- identity: 'generic-node-000'
+  endpoint: 'tls://splinterd-node-generic:8044'
+  display_name: 'Gamma - Node 1'
+  metadata:
+    organization: 'GAMMA Corporation'

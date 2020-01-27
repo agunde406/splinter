@@ -19,6 +19,7 @@ volumes:
   key-registry:
   acme-var:
   bubba-var:
+  generic-var:
 
 services:
 
@@ -255,6 +256,114 @@ services:
           cp -a /key_registry_shared/keys.yaml /var/lib/splinter && \
           splinter cert generate --skip && \
           splinterd -c ./configs/splinterd-node-bubba.toml -vv \
+              --service-endpoint 0.0.0.0:8043 \
+              --network-endpoint 0.0.0.0:8044 \
+              --bind 0.0.0.0:8085 \
+              --insecure
+        "
+
+    db-generic:
+      image: gameroom-database
+      container_name: db-generic
+      build:
+        context: ../..
+        dockerfile: ./examples/gameroom/database/Dockerfile-installed
+        args:
+          - REPO_VERSION=${REPO_VERSION}
+      restart: always
+      expose:
+        - 5432
+      ports:
+          - "5434:5432"
+      environment:
+        POSTGRES_USER: gameroom
+        POSTGRES_PASSWORD: gameroom_example
+        POSTGRES_DB: gameroom
+      volumes:
+        - "./database/tables:/docker-entrypoint-initdb.d"
+
+    gameroom-app-generic:
+      build:
+        context: ../..
+        dockerfile: ./examples/gameroom/gameroom-app/Dockerfile-installed
+        args:
+          VUE_APP_BRAND: "generic"
+          REPO_VERSION: ${REPO_VERSION}
+      image: gameroom-app-generic
+      container_name: gameroom-app-generic
+      environment:
+        - VUE_APP_BRAND=generic
+      expose:
+        - 80
+      ports:
+        - '8083:80'
+
+    gameroomd-generic:
+        image: gameroomd
+        container_name: gameroomd-generic
+        build:
+          context: ../..
+          dockerfile: ./examples/gameroom/daemon/Dockerfile-installed-${DISTRO}
+          args:
+            - CARGO_ARGS=${CARGO_ARGS}
+            - REPO_VERSION=${REPO_VERSION}
+        volumes:
+          - cargo-registry:/root/.cargo/registry
+        expose:
+          - 8000
+        ports:
+          - "8002:8000"
+        depends_on:
+          - splinterd-node-generic
+        command: |
+          bash -c "
+            # we need to wait for the db to have started.
+            until PGPASSWORD=gameroom_example psql -h db-generic -U gameroom -c '\q'; do
+                >&2 echo \"Database is unavailable - sleeping\"
+                sleep 1
+            done
+
+            # check if splinterd-node-generic is available
+            while [[ $$(curl --write-out %{http_code} --silent --output /dev/null http://splinterd-node-generic:8085/status) -ne 200 ]] ; do
+               >&2 echo \"SplinterD is unavailable - sleeping\"
+               sleep 1
+            done
+
+            gameroomd -vv --database-url postgres://gameroom:gameroom_example@db-generic:5432/gameroom \
+              -b gameroomd-generic:8000 --splinterd-url http://splinterd-node-generic:8085
+          "
+    splinterd-node-generic:
+      image: splinterd-node
+      container_name: splinterd-node-generic
+      build:
+        context: ../..
+        dockerfile: splinterd/Dockerfile-installed-${DISTRO}
+        args:
+          - CARGO_ARGS=${CARGO_ARGS}
+          - REPO_VERSION=${REPO_VERSION}
+      expose:
+        - 8080
+        - 8044
+        - 8945
+        - 8085
+      ports:
+        - 8090:8085
+      volumes:
+        - key-registry:/key_registry_shared
+        - generic-var:/var/lib/splinter
+        - ./splinterd-config:/configs
+        - ./node_registry:/node_registry
+      entrypoint: |
+        bash -c "
+          # We need to wait for the generated key registry to be available
+          while [ ! -f /key_registry_shared/keys.yaml ]; do \
+            echo 'waiting for key registry'; \
+            sleep 1; \
+          done && \
+          # Copy the generated key registry to its expected location
+          cp -a /key_registry_shared/keys.yaml /var/lib/splinter && \
+          splinter cert generate --skip && \
+          splinterd -c ./configs/splinterd-node-generic.toml -vv \
               --service-endpoint 0.0.0.0:8043 \
               --network-endpoint 0.0.0.0:8044 \
               --bind 0.0.0.0:8085 \
