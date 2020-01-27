@@ -622,6 +622,67 @@ impl AdminServiceShared {
         }
     }
 
+    /// Handle a new circuit proposal
+    ///
+    /// This operation will accept a new circuit proposal.  If there is no peer connection, a
+    /// connection to the peer will also be established.
+    pub fn handle_proposed_circuit(
+        &mut self,
+        proposal: Proposal,
+        payload: CircuitManagementPayload,
+        message_sender: String,
+    ) -> Result<(), ServiceError> {
+        let mut unauthorized_peers = vec![];
+        for node in payload
+            .get_circuit_create_request()
+            .get_circuit()
+            .get_members()
+        {
+            if self.node_id() != node.get_node_id() {
+                if self.auth_inquisitor().is_authorized(node.get_node_id()) {
+                    continue;
+                }
+
+                debug!("Connecting to node {:?}", node);
+                self.peer_connector
+                    .connect_peer(node.get_node_id(), node.get_endpoint())
+                    .map_err(|err| ServiceError::UnableToHandleMessage(Box::new(err)))?;
+
+                unauthorized_peers.push(node.get_node_id().into());
+            }
+        }
+
+        if unauthorized_peers.is_empty() {
+            self.add_pending_consensus_proposal(
+                proposal.id.clone(),
+                (proposal.clone(), payload),
+            );
+            self.proposal_sender
+                .as_ref()
+                .ok_or_else(|| ServiceError::NotStarted)?
+                .send(ProposalUpdate::ProposalReceived(
+                    proposal,
+                    message_sender.as_bytes().into(),
+                ))
+                .map_err(|err| ServiceError::UnableToHandleMessage(Box::new(err)))
+        } else {
+            debug!(
+                "Members {:?} added; awaiting network authorization before proceeding",
+                &unauthorized_peers
+            );
+
+            self.unpeered_payloads.push(UnpeeredPendingPayload {
+                ids: unauthorized_peers,
+                payload_type: PayloadType::Consensus(
+                    proposal.id.clone(),
+                    (proposal, payload),
+                ),
+                message_sender,
+            });
+            Ok(())
+        }
+    }
+
     pub fn get_events_since(
         &self,
         since_timestamp: &SystemTime,
