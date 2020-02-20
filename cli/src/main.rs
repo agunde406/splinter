@@ -134,7 +134,7 @@ fn run() -> Result<(), CliError> {
                         "DETAILS: \n\n\
                         The files are generated in the location specified by --cert-dir, the \
                         SPLINTER_CERT_DIR environment variable, or in the default location \
-                         /etc/splinter/certs/. \n\n\
+                        /etc/splinter/certs/. \
                         The following files are created: \n    \
                             - client.crt \n    \
                             - client.key \n    \
