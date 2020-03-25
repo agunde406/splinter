@@ -68,7 +68,7 @@ pub use crate::matrix::Envelope;
 pub use crate::mesh::control::{AddError, Control, RemoveError};
 pub use crate::mesh::incoming::Incoming;
 #[cfg(feature = "matrix")]
-pub use crate::mesh::matrix::{MeshLifeCycle, MeshMatrixSender};
+pub use crate::mesh::matrix::{MeshLifeCycle, MeshMatrixReceiver, MeshMatrixSender};
 pub use crate::mesh::outgoing::Outgoing;
 
 pub use crate::collections::BiHashMap;
@@ -274,6 +274,12 @@ impl Mesh {
     pub fn get_sender(&self) -> MeshMatrixSender {
         let mesh = self.clone();
         MeshMatrixSender::new(mesh)
+    }
+
+    #[cfg(feature = "matrix")]
+    pub fn get_receiver(&self) -> MeshMatrixReceiver {
+        let mesh = self.clone();
+        MeshMatrixReceiver::new(mesh)
     }
 }
 
