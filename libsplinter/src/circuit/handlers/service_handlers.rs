@@ -16,7 +16,7 @@ use crate::circuit::handlers::create_message;
 use crate::circuit::service::{Service, ServiceId, SplinterNode};
 use crate::circuit::{ServiceDefinition, SplinterState};
 use crate::network::dispatch::{DispatchError, Handler, MessageContext};
-use crate::network::sender::SendRequest;
+use crate::network::sender::{HandlerRequest, SendRequest};
 use crate::protos::circuit::{
     CircuitMessageType, ServiceConnectRequest, ServiceConnectResponse,
     ServiceConnectResponse_Status, ServiceDisconnectRequest, ServiceDisconnectResponse,
@@ -135,7 +135,7 @@ impl Handler<CircuitMessageType, ServiceConnectRequest> for ServiceConnectReques
             create_message(response_bytes, CircuitMessageType::SERVICE_CONNECT_RESPONSE)?;
 
         let recipient = context.source_peer_id().to_string();
-        let send_request = SendRequest::new(recipient, network_msg_bytes);
+        let send_request = SendRequest::Request(HandlerRequest::new(recipient, network_msg_bytes));
         sender.send(send_request)?;
         Ok(())
     }
@@ -227,7 +227,7 @@ impl Handler<CircuitMessageType, ServiceDisconnectRequest> for ServiceDisconnect
         )?;
 
         let recipient = context.source_peer_id().to_string();
-        let send_request = SendRequest::new(recipient, network_msg_bytes);
+        let send_request = SendRequest::Request(HandlerRequest::new(recipient, network_msg_bytes));
         sender.send(send_request)?;
         Ok(())
     }
@@ -287,7 +287,10 @@ mod tests {
                 connect_bytes.clone(),
             )
             .unwrap();
-        let send_request = sender.sent().get(0).unwrap().clone();
+        let send_request = match sender.sent().get(0).unwrap().clone() {
+            SendRequest::Request(request) => request,
+            _ => panic!("Should have gotten a HandlerRequest"),
+        };
 
         assert_eq!(send_request.recipient(), "abc");
 
@@ -342,7 +345,10 @@ mod tests {
                 connect_bytes.clone(),
             )
             .unwrap();
-        let send_request = sender.sent().get(0).unwrap().clone();
+        let send_request = match sender.sent().get(0).unwrap().clone() {
+            SendRequest::Request(request) => request,
+            _ => panic!("Should have gotten a HandlerRequest"),
+        };
 
         assert_eq!(send_request.recipient(), "BAD");
 
@@ -402,7 +408,10 @@ mod tests {
             .unwrap();
         let send_requests = sender.sent();
         assert_eq!(send_requests.len(), 1);
-        let send_request = send_requests.get(0).unwrap().clone();
+        let send_request = match send_requests.get(0).unwrap().clone() {
+            SendRequest::Request(request) => request,
+            _ => panic!("Should have gotten a HandlerRequest"),
+        };
 
         assert_eq!(send_request.recipient(), "PEER");
 
@@ -465,7 +474,10 @@ mod tests {
                 connect_bytes.clone(),
             )
             .unwrap();
-        let send_request = sender.sent().get(0).unwrap().clone();
+        let send_request = match sender.sent().get(0).unwrap().clone() {
+            SendRequest::Request(request) => request,
+            _ => panic!("Should have gotten a HandlerRequest"),
+        };
 
         assert_eq!(send_request.recipient(), "PEER");
 
@@ -516,7 +528,10 @@ mod tests {
                 disconnect_bytes.clone(),
             )
             .unwrap();
-        let send_request = sender.sent().get(0).unwrap().clone();
+        let send_request = match sender.sent().get(0).unwrap().clone() {
+            SendRequest::Request(request) => request,
+            _ => panic!("Should have gotten a HandlerRequest"),
+        };
 
         assert_eq!(send_request.recipient(), "abc");
 
@@ -570,7 +585,10 @@ mod tests {
                 disconnect_bytes.clone(),
             )
             .unwrap();
-        let send_request = sender.sent().get(0).unwrap().clone();
+        let send_request = match sender.sent().get(0).unwrap().clone() {
+            SendRequest::Request(request) => request,
+            _ => panic!("Should have gotten a HandlerRequest"),
+        };
 
         assert_eq!(send_request.recipient(), "BAD");
 
@@ -632,7 +650,10 @@ mod tests {
             .unwrap();
         let send_requests = sender.sent();
         assert_eq!(send_requests.len(), 1);
-        let send_request = send_requests.get(0).unwrap().clone();
+        let send_request = match send_requests.get(0).unwrap().clone() {
+            SendRequest::Request(request) => request,
+            _ => panic!("Should have gotten a HandlerRequest"),
+        };
 
         assert_eq!(send_request.recipient(), "PEER");
 
@@ -689,7 +710,10 @@ mod tests {
                 disconnect_bytes.clone(),
             )
             .unwrap();
-        let send_request = sender.sent().get(0).unwrap().clone();
+        let send_request = match sender.sent().get(0).unwrap().clone() {
+            SendRequest::Request(request) => request,
+            _ => panic!("Should have gotten a HandlerRequest"),
+        };
 
         assert_eq!(send_request.recipient(), "PEER");
 

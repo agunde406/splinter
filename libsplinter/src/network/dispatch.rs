@@ -431,7 +431,7 @@ mod tests {
     use protobuf::Message;
 
     use crate::channel::mock::MockSender;
-    use crate::network::sender::SendRequest;
+    use crate::network::sender::{HandlerRequest, SendRequest};
     use crate::protos::network::{NetworkEcho, NetworkMessageType};
 
     /// Verify that messages can be dispatched to handlers implemented as closures.
@@ -533,7 +533,10 @@ mod tests {
         );
 
         assert_eq!(
-            &vec![SendRequest::new("TestPeer".into(), vec![])],
+            &vec![SendRequest::Request(HandlerRequest::new(
+                "TestPeer".into(),
+                vec![]
+            ))],
             &network_sender.sent()
         );
     }
@@ -605,10 +608,10 @@ mod tests {
         let expected_message: Vec<u8> = vec![];
         assert_eq!(expected_message, message.bytes());
 
-        network_sender.send(SendRequest::new(
+        network_sender.send(SendRequest::Request(HandlerRequest::new(
             message_context.source_peer_id().to_string(),
             vec![],
-        ))?;
+        )))?;
 
         Ok(())
     }

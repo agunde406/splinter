@@ -27,7 +27,7 @@ use protobuf::Message;
 
 use splinter::consensus::{ConsensusMessage, Proposal, ProposalUpdate};
 use splinter::network::{
-    sender::{NetworkMessageSender, SendRequest},
+    sender::{NetworkMessageSender, SendRequest, HandlerRequest},
     Network, RecvTimeoutError,
 };
 use splinter::protos::authorization::{
@@ -254,13 +254,13 @@ fn handle_authorized_msg(
             {
                 let mut trust_request = TrustRequest::new();
                 trust_request.set_identity(identity.to_string());
-                sender.send(SendRequest::new(
+                sender.send(SendRequest::Request(HandlerRequest::new(
                     source_peer_id.to_string(),
                     wrap_in_network_auth_envelopes(
                         AuthorizationMessageType::TRUST_REQUEST,
                         trust_request,
                     )?,
-                ))?;
+                )))?;
             }
             // send trust request
             Ok(false)

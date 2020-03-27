@@ -25,7 +25,7 @@ use splinter::consensus::{
     ConsensusMessage, ConsensusNetworkSender, PeerId, Proposal, ProposalId, ProposalManager,
     ProposalUpdate,
 };
-use splinter::network::sender::SendRequest;
+use splinter::network::sender::{SendRequest, HandlerRequest};
 use transact::protos::{batch::Batch, FromProto};
 
 use crate::protos::private_xo::{PrivateXoMessage, PrivateXoMessage_Type, ProposedBatch};
@@ -108,7 +108,7 @@ impl ProposalManager for PrivateXoProposalManager {
 
             for verifier in self.config.verifiers() {
                 self.service_sender
-                    .send(SendRequest::new(
+                    .send(SendRequest::Request(HandlerRequest::new(
                         self.config.peer_id().into(),
                         create_circuit_direct_msg(
                             self.config.circuit().into(),
@@ -117,7 +117,7 @@ impl ProposalManager for PrivateXoProposalManager {
                             &msg,
                             Uuid::new_v4().to_string(),
                         )?,
-                    ))
+                    )))
                     .map_err(ServiceError::from)?;
             }
 
@@ -255,7 +255,7 @@ impl ConsensusNetworkSender for PrivateXoNetworkSender {
         msg.set_consensus_message(consensus_message.try_into()?);
 
         self.service_sender
-            .send(SendRequest::new(
+            .send(SendRequest::Request(HandlerRequest::new(
                 self.config.peer_id().into(),
                 create_circuit_direct_msg(
                     self.config.circuit().into(),
@@ -266,7 +266,7 @@ impl ConsensusNetworkSender for PrivateXoNetworkSender {
                     Uuid::new_v4().to_string(),
                 )
                 .map_err(|err| ConsensusSendError::Internal(Box::new(err)))?,
-            ))
+            )))
             .map_err(|err| ConsensusSendError::Internal(Box::new(ServiceError::from(err))))?;
 
         Ok(())
@@ -281,7 +281,7 @@ impl ConsensusNetworkSender for PrivateXoNetworkSender {
 
         for verifier in self.config.verifiers() {
             self.service_sender
-                .send(SendRequest::new(
+                .send(SendRequest::Request(HandlerRequest::new(
                     self.config.peer_id().into(),
                     create_circuit_direct_msg(
                         self.config.circuit().into(),
@@ -291,7 +291,7 @@ impl ConsensusNetworkSender for PrivateXoNetworkSender {
                         Uuid::new_v4().to_string(),
                     )
                     .map_err(|err| ConsensusSendError::Internal(Box::new(err)))?,
-                ))
+                )))
                 .map_err(|err| ConsensusSendError::Internal(Box::new(ServiceError::from(err))))?;
         }
 

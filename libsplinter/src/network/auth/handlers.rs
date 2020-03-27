@@ -21,7 +21,7 @@ use crate::network::auth::{
 use crate::network::dispatch::{
     DispatchError, DispatchMessage, Dispatcher, FromMessageBytes, Handler, MessageContext,
 };
-use crate::network::sender::SendRequest;
+use crate::network::sender::{HandlerRequest, SendRequest};
 use crate::protos::authorization::{
     AuthorizationError, AuthorizationMessage, AuthorizationMessageType, AuthorizedMessage,
     ConnectRequest, ConnectRequest_HandshakeMode, ConnectResponse,
@@ -196,13 +196,13 @@ impl Handler<AuthorizationMessageType, ConnectRequest> for ConnectRequestHandler
                 if msg.get_handshake_mode() == ConnectRequest_HandshakeMode::BIDIRECTIONAL {
                     let mut connect_req = ConnectRequest::new();
                     connect_req.set_handshake_mode(ConnectRequest_HandshakeMode::UNIDIRECTIONAL);
-                    sender.send(SendRequest::new(
+                    sender.send(SendRequest::Request(HandlerRequest::new(
                         context.source_peer_id().to_string(),
                         wrap_in_network_auth_envelopes(
                             AuthorizationMessageType::CONNECT_REQUEST,
                             connect_req,
                         )?,
-                    ))?;
+                    )))?;
                     debug!(
                         "Sent bidirectional connect request to peer {}",
                         context.source_peer_id()
@@ -213,13 +213,13 @@ impl Handler<AuthorizationMessageType, ConnectRequest> for ConnectRequestHandler
                 response.set_accepted_authorization_types(vec![
                     ConnectResponse_AuthorizationType::TRUST,
                 ]);
-                sender.send(SendRequest::new(
+                sender.send(SendRequest::Request(HandlerRequest::new(
                     context.source_peer_id().to_string(),
                     wrap_in_network_auth_envelopes(
                         AuthorizationMessageType::CONNECT_RESPONSE,
                         response,
                     )?,
-                ))?;
+                )))?;
             }
             Ok(AuthorizationState::Internal) => {
                 debug!(
@@ -227,10 +227,10 @@ impl Handler<AuthorizationMessageType, ConnectRequest> for ConnectRequestHandler
                     context.source_peer_id()
                 );
                 let auth_msg = AuthorizedMessage::new();
-                sender.send(SendRequest::new(
+                sender.send(SendRequest::Request(HandlerRequest::new(
                     context.source_peer_id().to_string(),
                     wrap_in_network_auth_envelopes(AuthorizationMessageType::AUTHORIZE, auth_msg)?,
-                ))?;
+                )))?;
             }
             Ok(next_state) => panic!("Should not have been able to transition to {}", next_state),
         }
@@ -269,13 +269,13 @@ impl Handler<AuthorizationMessageType, ConnectResponse> for ConnectResponseHandl
         {
             let mut trust_request = TrustRequest::new();
             trust_request.set_identity(self.auth_manager.identity.clone());
-            sender.send(SendRequest::new(
+            sender.send(SendRequest::Request(HandlerRequest::new(
                 context.source_peer_id().to_string(),
                 wrap_in_network_auth_envelopes(
                     AuthorizationMessageType::TRUST_REQUEST,
                     trust_request,
                 )?,
-            ))?;
+            )))?;
         }
         Ok(())
     }
@@ -317,10 +317,10 @@ impl Handler<AuthorizationMessageType, TrustRequest> for TrustRequestHandler {
                     context.source_peer_id()
                 );
                 let auth_msg = AuthorizedMessage::new();
-                sender.send(SendRequest::new(
+                sender.send(SendRequest::Request(HandlerRequest::new(
                     msg.get_identity().to_string(),
                     wrap_in_network_auth_envelopes(AuthorizationMessageType::AUTHORIZE, auth_msg)?,
-                ))?;
+                )))?;
             }
             Ok(next_state) => panic!("Should not have been able to transition to {}", next_state),
         }
@@ -426,7 +426,10 @@ mod tests {
         );
 
         let mut sent = network_sender.clear();
-        let send_request = sent.pop().expect("A message should have been sent");
+        let send_request = match sent.pop().expect("A message should have been sent") {
+            SendRequest::Request(request) => request,
+            _ => panic!("Should have gotten a HandlerRequest"),
+        };
 
         let connect_res_msg: ConnectResponse = expect_auth_message(
             AuthorizationMessageType::CONNECT_RESPONSE,
@@ -437,9 +440,13 @@ mod tests {
             connect_res_msg.get_accepted_authorization_types().to_vec()
         );
 
-        let send_request = sent
+        let send_request = match sent
             .pop()
-            .expect("An additional message should have been sent");
+            .expect("An additional message should have been sent")
+        {
+            SendRequest::Request(request) => request,
+            _ => panic!("Should have gotten a HandlerRequest"),
+        };
         let connect_req_msg: ConnectRequest = expect_auth_message(
             AuthorizationMessageType::CONNECT_REQUEST,
             send_request.payload(),
@@ -473,10 +480,14 @@ mod tests {
             )
         );
 
-        let send_request = network_sender
+        let send_request = match network_sender
             .clear()
             .pop()
-            .expect("A message should have been sent");
+            .expect("A message should have been sent")
+        {
+            SendRequest::Request(request) => request,
+            _ => panic!("Should have gotten a HandlerRequest"),
+        };
 
         let trust_req: TrustRequest = expect_auth_message(
             AuthorizationMessageType::TRUST_REQUEST,
@@ -508,10 +519,14 @@ mod tests {
             )
         );
 
-        let send_request = network_sender
+        let send_request = match network_sender
             .clear()
             .pop()
-            .expect("A message should have been sent");
+            .expect("A message should have been sent")
+        {
+            SendRequest::Request(request) => request,
+            _ => panic!("Should have gotten a HandlerRequest"),
+        };
         let _connect_res_msg: ConnectResponse = expect_auth_message(
             AuthorizationMessageType::CONNECT_RESPONSE,
             send_request.payload(),
@@ -530,10 +545,14 @@ mod tests {
                 msg_bytes
             )
         );
-        let send_request = network_sender
+        let send_request = match network_sender
             .clear()
             .pop()
-            .expect("A message should have been sent");
+            .expect("A message should have been sent")
+        {
+            SendRequest::Request(request) => request,
+            _ => panic!("Should have gotten a HandlerRequest"),
+        };
 
         let _auth_msg: AuthorizedMessage =
             expect_auth_message(AuthorizationMessageType::AUTHORIZE, send_request.payload());
@@ -566,10 +585,14 @@ mod tests {
             )
         );
 
-        let send_request = network_sender
+        let send_request = match network_sender
             .clear()
             .pop()
-            .expect("A message should have been sent");
+            .expect("A message should have been sent")
+        {
+            SendRequest::Request(request) => request,
+            _ => panic!("Should have gotten a HandlerRequest"),
+        };
         let _connect_res_msg: ConnectResponse = expect_auth_message(
             AuthorizationMessageType::CONNECT_RESPONSE,
             send_request.payload(),

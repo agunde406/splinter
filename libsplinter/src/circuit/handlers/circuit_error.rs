@@ -16,7 +16,7 @@ use crate::channel::Sender;
 use crate::circuit::handlers::create_message;
 use crate::circuit::{ServiceId, SplinterState};
 use crate::network::dispatch::{DispatchError, Handler, MessageContext};
-use crate::network::sender::SendRequest;
+use crate::network::sender::{HandlerRequest, SendRequest};
 use crate::protos::circuit::{CircuitError, CircuitMessageType};
 
 // Implements a handler that handles CircuitError messages
@@ -81,7 +81,7 @@ impl Handler<CircuitMessageType, CircuitError> for CircuitErrorHandler {
         )?;
 
         // forward error message
-        let send_request = SendRequest::new(recipient, network_msg_bytes);
+        let send_request = SendRequest::Request(HandlerRequest::new(recipient, network_msg_bytes));
         sender.send(send_request)?;
         Ok(())
     }
@@ -169,7 +169,10 @@ mod tests {
             .unwrap();
 
         // verify that the error message was sent to the abc service
-        let send_request = sender.sent().get(0).unwrap().clone();
+        let send_request = match sender.sent().get(0).unwrap().clone() {
+            SendRequest::Request(request) => request,
+            _ => panic!("Should have gotten a HandlerRequest"),
+        };
 
         assert_eq!(send_request.recipient(), "abc_network");
 
@@ -256,7 +259,10 @@ mod tests {
             .unwrap();
 
         // verify that the error message was sent to the 345 node
-        let send_request = sender.sent().get(0).unwrap().clone();
+        let send_request = match sender.sent().get(0).unwrap().clone() {
+            SendRequest::Request(request) => request,
+            _ => panic!("Should have gotten a HandlerRequest"),
+        };
 
         assert_eq!(send_request.recipient(), "345");
 

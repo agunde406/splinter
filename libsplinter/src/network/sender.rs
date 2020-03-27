@@ -11,6 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,14 +24,14 @@ const TIMEOUT_SEC: u64 = 2;
 
 // Message to send to the network message sender with the recipient and payload
 #[derive(Clone, Debug, PartialEq)]
-pub struct SendRequest {
+pub struct HandlerRequest {
     recipient: String,
     payload: Vec<u8>,
 }
 
-impl SendRequest {
+impl HandlerRequest {
     pub fn new(recipient: String, payload: Vec<u8>) -> Self {
-        SendRequest { recipient, payload }
+        HandlerRequest { recipient, payload }
     }
 
     pub fn recipient(&self) -> &str {
@@ -40,6 +41,12 @@ impl SendRequest {
     pub fn payload(&self) -> &[u8] {
         &self.payload
     }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum SendRequest {
+    Request(HandlerRequest),
+    Shutdown,
 }
 
 // The NetworkMessageSender recv messages that should be sent over the network. The Sender side of
@@ -67,7 +74,8 @@ impl NetworkMessageSender {
         let timeout = Duration::from_secs(TIMEOUT_SEC);
         while self.running.load(Ordering::SeqCst) {
             let send_request = match self.rc.recv_timeout(timeout) {
-                Ok(send_request) => send_request,
+                Ok(SendRequest::Request(send_request)) => send_request,
+                Ok(SendRequest::Shutdown) => break,
                 Err(RecvTimeoutError::Timeout) => continue,
                 Err(RecvTimeoutError::Disconnected) => {
                     error!("Received Disconnected Error from receiver");
@@ -87,7 +95,7 @@ impl NetworkMessageSender {
         }
 
         // Finish sending any messages that may be queued
-        while let Ok(send_request) = self.rc.try_recv() {
+        while let Ok(SendRequest::Request(send_request)) = self.rc.try_recv() {
             match self
                 .network
                 .send(send_request.recipient(), send_request.payload())
@@ -154,8 +162,10 @@ mod tests {
 
         thread::spawn(move || network_message_sender.run());
 
-        let send_request =
-            SendRequest::new("123".to_string(), b"FromNetworkMessageSender".to_vec());
+        let send_request = SendRequest::Request(HandlerRequest::new(
+            "123".to_string(),
+            b"FromNetworkMessageSender".to_vec(),
+        ));
         sender.send(send_request).unwrap();
     }
 
@@ -195,8 +205,10 @@ mod tests {
 
         thread::spawn(move || network_message_sender.run());
 
-        let send_request =
-            SendRequest::new("123".to_string(), b"FromNetworkMessageSender".to_vec());
+        let send_request = SendRequest::Request(HandlerRequest::new(
+            "123".to_string(),
+            b"FromNetworkMessageSender".to_vec(),
+        ));
 
         for _ in 0..100 {
             sender.send(send_request.clone()).unwrap();

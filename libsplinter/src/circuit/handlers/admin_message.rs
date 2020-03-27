@@ -16,7 +16,7 @@ use crate::channel::Sender;
 use crate::circuit::handlers::create_message;
 use crate::circuit::SplinterState;
 use crate::network::dispatch::{DispatchError, Handler, MessageContext};
-use crate::network::sender::SendRequest;
+use crate::network::sender::{HandlerRequest, SendRequest};
 use crate::protos::circuit::{
     AdminDirectMessage, CircuitError, CircuitError_Error, CircuitMessageType,
 };
@@ -56,7 +56,7 @@ impl Handler<CircuitMessageType, AdminDirectMessage> for AdminDirectMessageHandl
         // peer_id to send back the error message
         let (msg_bytes, msg_recipient) = self.create_response(msg, context)?;
         // either forward the direct message or send back an error message.
-        let send_request = SendRequest::new(msg_recipient, msg_bytes);
+        let send_request = SendRequest::Request(HandlerRequest::new(msg_recipient, msg_bytes));
         sender.send(send_request)?;
         Ok(())
     }
@@ -223,7 +223,10 @@ mod tests {
             )
         );
 
-        let send_request = sender.sent().lock().unwrap().get(0).unwrap().clone();
+        let send_request = match sender.sent().lock().unwrap().get(0).unwrap().clone() {
+            SendRequest::Request(request) => request,
+            _ => panic!("Should have gotten a HandlerRequest"),
+        };
 
         assert_send_request(
             send_request,
@@ -286,7 +289,10 @@ mod tests {
             )
         );
 
-        let send_request = sender.sent().lock().unwrap().get(0).unwrap().clone();
+        let send_request = match sender.sent().lock().unwrap().get(0).unwrap().clone() {
+            SendRequest::Request(request) => request,
+            _ => panic!("Should have gotten a HandlerRequest"),
+        };
 
         assert_send_request(
             send_request,
@@ -349,7 +355,10 @@ mod tests {
             )
         );
 
-        let send_request = sender.sent().lock().unwrap().get(0).unwrap().clone();
+        let send_request = match sender.sent().lock().unwrap().get(0).unwrap().clone() {
+            SendRequest::Request(request) => request,
+            _ => panic!("Should have gotten a HandlerRequest"),
+        };
 
         assert_send_request(
             send_request,
@@ -397,7 +406,10 @@ mod tests {
             )
         );
 
-        let send_request = sender.sent().lock().unwrap().get(0).unwrap().clone();
+        let send_request = match sender.sent().lock().unwrap().get(0).unwrap().clone() {
+            SendRequest::Request(request) => request,
+            _ => panic!("Should have gotten a HandlerRequest"),
+        };
 
         assert_send_request(
             send_request,
@@ -445,7 +457,10 @@ mod tests {
             )
         );
 
-        let send_request = sender.sent().lock().unwrap().get(0).unwrap().clone();
+        let send_request = match sender.sent().lock().unwrap().get(0).unwrap().clone() {
+            SendRequest::Request(request) => request,
+            _ => panic!("Should have gotten a HandlerRequest"),
+        };
 
         assert_send_request(
             send_request,
@@ -462,7 +477,7 @@ mod tests {
     }
 
     fn assert_send_request<M: protobuf::Message, F: Fn(M)>(
-        send_request: SendRequest,
+        send_request: HandlerRequest,
         expected_recipient: &str,
         expected_circuit_msg_type: CircuitMessageType,
         detail_assertions: F,

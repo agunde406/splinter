@@ -13,7 +13,7 @@
 // limitations under the License.
 use crate::channel::Sender;
 use crate::network::dispatch::{DispatchError, Handler, MessageContext};
-use crate::network::sender::SendRequest;
+use crate::network::sender::{HandlerRequest, SendRequest};
 use crate::protos::network::{NetworkEcho, NetworkHeartbeat, NetworkMessage, NetworkMessageType};
 
 use protobuf::Message;
@@ -54,7 +54,7 @@ impl Handler<NetworkMessageType, NetworkEcho> for NetworkEchoHandler {
         network_msg.set_payload(echo_bytes);
         let network_msg_bytes = network_msg.write_to_bytes().unwrap();
 
-        let send_request = SendRequest::new(recipient, network_msg_bytes);
+        let send_request = SendRequest::Request(HandlerRequest::new(recipient, network_msg_bytes));
         sender.send(send_request)?;
         Ok(())
     }
@@ -123,7 +123,10 @@ mod tests {
             )
         );
 
-        let send_request = sender.sent().get(0).unwrap().clone();
+        let send_request = match sender.sent().get(0).unwrap().clone() {
+            SendRequest::Request(request) => request,
+            _ => panic!("Should have gotten a HandlerRequest"),
+        };
 
         assert_eq!(send_request.recipient(), "OTHER_PEER");
         let network_msg: NetworkMessage =
