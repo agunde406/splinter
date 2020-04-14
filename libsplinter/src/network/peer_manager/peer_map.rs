@@ -62,6 +62,20 @@ impl PeerMap {
             .collect()
     }
 
+    /// Returns the active_endpoint for a peer_id
+    pub fn get_peer_endpoint(&self, peer_id: &str) -> Option<String> {
+        let peer_metadata_option = self
+            .redirects
+            .get(peer_id)
+            .and_then(|target_peer_id| self.peers.get(target_peer_id))
+            .or_else(|| self.peers.get(peer_id));
+
+        match peer_metadata_option {
+            Some(peer_metadata) => Some(peer_metadata.active_endpoint.to_string()),
+            None => None,
+        }
+    }
+
     /// Returns the current map of peer ids to connection_ids
     ///
     /// This list does not include any of the redirected peer ids.
@@ -95,6 +109,20 @@ impl PeerMap {
         for endpoint in endpoints {
             self.endpoints.insert(endpoint, peer_id.clone());
         }
+    }
+
+    pub fn insert_incoming(&mut self, endpoint: String, connection_id: String) {
+        let peer_id = format!("temp-{}", endpoint);
+        let peer_metadata = PeerMetadata {
+            id: peer_id.clone(),
+            endpoints: vec![endpoint.clone()],
+            active_endpoint: endpoint.clone(),
+            status: PeerStatus::Connected,
+            connection_id,
+        };
+
+        self.peers.insert(peer_id.clone(), peer_metadata);
+        self.endpoints.insert(endpoint, peer_id.clone());
     }
 
     /// Remove a peer id, its endpoint and all of its redirects. Returns the active_endpoint of

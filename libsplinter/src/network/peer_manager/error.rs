@@ -80,6 +80,29 @@ impl fmt::Display for PeerRefRemoveError {
 }
 
 #[derive(Debug, PartialEq)]
+pub enum PeerUnauthorizeError {
+    InternalError(String),
+    ReceiveError(String),
+    RemoveError(String),
+}
+
+impl error::Error for PeerUnauthorizeError {}
+
+impl fmt::Display for PeerUnauthorizeError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            PeerUnauthorizeError::InternalError(msg) => {
+                write!(f, "Received internal error: {}", msg)
+            }
+            PeerUnauthorizeError::ReceiveError(msg) => {
+                write!(f, "Unable to receive response from PeerManager: {}", msg)
+            }
+            PeerUnauthorizeError::RemoveError(msg) => write!(f, "Unable to remove peer: {}", msg),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
 pub enum PeerRefUpdateError {
     InternalError(String),
     ReceiveError(String),
@@ -117,6 +140,29 @@ impl fmt::Display for PeerListError {
                 write!(f, "Unable to receive response from PeerManager: {}", msg)
             }
             PeerListError::ListError(msg) => write!(f, "Unable to list peers: {}", msg),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum PeerEndpointError {
+    InternalError(String),
+    ReceiveError(String),
+    GetError(String),
+}
+
+impl error::Error for PeerEndpointError {}
+
+impl fmt::Display for PeerEndpointError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            PeerEndpointError::InternalError(msg) => write!(f, "Received internal error: {}", msg),
+            PeerEndpointError::ReceiveError(msg) => {
+                write!(f, "Unable to receive response from PeerManager: {}", msg)
+            }
+            PeerEndpointError::GetError(msg) => {
+                write!(f, "Unable to get active endpoint for peer: {}", msg)
+            }
         }
     }
 }

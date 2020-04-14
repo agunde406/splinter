@@ -22,8 +22,8 @@ use std::sync::mpsc::{channel, Sender};
 use std::thread;
 
 use self::error::{
-    PeerConnectionIdError, PeerListError, PeerManagerError, PeerRefAddError, PeerRefRemoveError,
-    PeerRefUpdateError,
+    PeerConnectionIdError, PeerEndpointError, PeerListError, PeerManagerError, PeerRefAddError,
+    PeerRefRemoveError, PeerRefUpdateError, PeerUnauthorizeError,
 };
 use crate::collections::BiHashMap;
 use crate::network::connection_manager::ConnectionManagerNotification;
@@ -72,18 +72,25 @@ pub(crate) enum PeerManagerRequest {
         peer_id: String,
         sender: Sender<Result<(), PeerRefRemoveError>>,
     },
+    UnauthorizePeer {
+        peer_id: String,
+        sender: Sender<Result<(), PeerUnauthorizeError>>,
+    },
     ListPeers {
         sender: Sender<Result<Vec<String>, PeerListError>>,
     },
     ConnectionIds {
         sender: Sender<Result<BiHashMap<String, String>, PeerConnectionIdError>>,
     },
+    GetPeerEndpoint {
+        peer_id: String,
+        sender: Sender<Result<Option<String>, PeerEndpointError>>,
+    },
 }
 
 /// A PeerRef is used to keep track of peer references. When dropped, the PeerRef will send
 /// a request to the PeerManager to remove a reference to the peer, thus removing the peer if no
 /// more references exists.
-
 #[derive(Debug, PartialEq)]
 pub struct PeerRef {
     peer_id: String,
@@ -323,6 +330,19 @@ fn handle_request(
                 warn!("connector dropped before receiving result of connection ids");
             }
         }
+        PeerManagerRequest::GetPeerEndpoint { peer_id, sender } => {
+            if sender.send(Ok(peers.get_peer_endpoint(&peer_id))).is_err() {
+                warn!("connector dropped before receiving result of connection ids");
+            }
+        }
+        PeerManagerRequest::UnauthorizePeer { peer_id, sender } => {
+            if sender
+                .send(unauthorize_peer(peer_id, connector, peers))
+                .is_err()
+            {
+                warn!("connector dropped before receiving result of removing peer");
+            }
+        }
     };
 }
 
@@ -441,6 +461,35 @@ fn remove_peer(
     }
 }
 
+fn unauthorize_peer(
+    peer_id: String,
+    connector: Connector,
+    peers: &mut PeerMap,
+) -> Result<(), PeerUnauthorizeError> {
+    warn!("Forcibly removing peer: {}", peer_id);
+
+    let active_endpoint = peers.remove(&peer_id).ok_or_else(|| {
+        PeerUnauthorizeError::RemoveError(format!(
+            "Peer {} has already been removed from the peer map",
+            peer_id
+        ))
+    })?;
+
+    match connector.remove_connection(&active_endpoint) {
+        Ok(Some(_)) => {
+            debug!(
+                "Peer {} has been removed and connection {} has been closed",
+                peer_id, active_endpoint
+            );
+            Ok(())
+        }
+        Ok(None) => Err(PeerUnauthorizeError::RemoveError(
+            "No connection to remove, something has gone wrong".to_string(),
+        )),
+        Err(err) => Err(PeerUnauthorizeError::RemoveError(format!("{}", err))),
+    }
+}
+
 // If a connection has reached the retry limit before it could be reestablished, the peer manager
 // will try the peer's other endpoints.
 fn retry_endpoints(
@@ -553,7 +602,12 @@ fn handle_notifications(
                 }
             }
         }
-        ConnectionManagerNotification::InboundConnection { .. } => (),
+        ConnectionManagerNotification::InboundConnection {
+            endpoint,
+            connection_id,
+        } => {
+            peers.insert_incoming(endpoint, connection_id)
+        }
     }
 }
 

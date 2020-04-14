@@ -17,8 +17,8 @@ use std::sync::mpsc::{channel, Sender};
 use crate::collections::BiHashMap;
 
 use super::error::{
-    PeerConnectionIdError, PeerListError, PeerManagerError, PeerRefAddError, PeerRefRemoveError,
-    PeerRefUpdateError,
+    PeerConnectionIdError, PeerEndpointError, PeerListError, PeerManagerError, PeerRefAddError,
+    PeerRefRemoveError, PeerRefUpdateError, PeerUnauthorizeError,
 };
 use super::notification::PeerNotificationIter;
 use super::PeerRef;
@@ -148,6 +148,27 @@ impl PeerManagerConnector {
             .map_err(|err| PeerConnectionIdError::ReceiveError(format!("{:?}", err)))?
     }
 
+    /// Request the active endpoint of a peer_id
+    ///
+    /// Returns the list of peer ids.
+    pub fn get_peer_endpoint(&self, peer_id: String) -> Result<Option<String>, PeerEndpointError> {
+        let (sender, recv) = channel();
+        let message =
+            PeerManagerMessage::Request(PeerManagerRequest::GetPeerEndpoint { peer_id, sender });
+
+        match self.sender.send(message) {
+            Ok(()) => (),
+            Err(_) => {
+                return Err(PeerEndpointError::InternalError(
+                    "Unable to send message to PeerManager, receiver dropped".to_string(),
+                ))
+            }
+        };
+
+        recv.recv()
+            .map_err(|err| PeerEndpointError::ReceiveError(format!("{:?}", err)))?
+    }
+
     /// Subscribe to PeerManager notifications.
     ///
     /// Returns a PeerNotificationIter that can be used to receive notications about connected and
@@ -160,6 +181,27 @@ impl PeerManagerConnector {
                 "The peer manager is no longer running".into(),
             )),
         }
+    }
+
+    pub fn unauthorize_peer(&self, peer_id: &str) -> Result<(), PeerUnauthorizeError> {
+        let (sender, recv) = channel();
+
+        let message = PeerManagerMessage::Request(PeerManagerRequest::UnauthorizePeer {
+            peer_id: peer_id.to_string(),
+            sender,
+        });
+
+        match self.sender.send(message) {
+            Ok(()) => (),
+            Err(_) => {
+                return Err(PeerUnauthorizeError::InternalError(
+                    "Unable to send message to PeerManager, receiver dropped".to_string(),
+                ))
+            }
+        };
+
+        recv.recv()
+            .map_err(|err| PeerUnauthorizeError::ReceiveError(format!("{:?}", err)))?
     }
 }
 
