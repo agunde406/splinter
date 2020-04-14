@@ -204,6 +204,7 @@ impl Handler for ConnectRequestHandler {
         context: &MessageContext<Self::Source, Self::MessageType>,
         sender: &NetworkMessageSender,
     ) -> Result<(), DispatchError> {
+        println!("GOT {}", context.source_peer_id());
         match self
             .auth_manager
             .next_state(context.source_peer_id(), AuthorizationAction::Connecting)
@@ -244,6 +245,7 @@ impl Handler for ConnectRequestHandler {
                 response.set_accepted_authorization_types(vec![
                     ConnectResponse_AuthorizationType::TRUST,
                 ]);
+                println!("Send response {:?}", response);
                 sender
                     .send(
                         context.source_peer_id().to_string(),
@@ -353,6 +355,7 @@ impl Handler for TrustRequestHandler {
         context: &MessageContext<Self::Source, Self::MessageType>,
         sender: &NetworkMessageSender,
     ) -> Result<(), DispatchError> {
+        println!("GET TrustRequest: {}", context.source_peer_id());
         match self.auth_manager.next_state(
             context.source_peer_id(),
             AuthorizationAction::TrustIdentifying(msg.get_identity().to_string()),
@@ -450,6 +453,7 @@ fn wrap_in_network_auth_envelopes<M: protobuf::Message>(
     network_msg.write_to_bytes().map_err(DispatchError::from)
 }
 
+#[cfg(not(feature = "network-peer-manager"))]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -810,6 +814,495 @@ mod tests {
         let peer_id = network.peer_ids()[0].clone();
 
         (network, peer_id)
+    }
+
+    struct MockConnectingTransport;
+
+    impl Transport for MockConnectingTransport {
+        fn accepts(&self, _: &str) -> bool {
+            true
+        }
+
+        fn connect(&mut self, _: &str) -> Result<Box<dyn Connection>, ConnectError> {
+            Ok(Box::new(MockConnection))
+        }
+
+        fn listen(
+            &mut self,
+            _: &str,
+        ) -> Result<Box<dyn crate::transport::Listener>, crate::transport::ListenError> {
+            unimplemented!()
+        }
+    }
+
+    struct MockConnection;
+
+    impl Connection for MockConnection {
+        fn send(&mut self, _message: &[u8]) -> Result<(), SendError> {
+            Ok(())
+        }
+
+        fn recv(&mut self) -> Result<Vec<u8>, RecvError> {
+            unimplemented!()
+        }
+
+        fn remote_endpoint(&self) -> String {
+            String::from("MockConnection")
+        }
+
+        fn local_endpoint(&self) -> String {
+            String::from("MockConnection")
+        }
+
+        fn disconnect(&mut self) -> Result<(), DisconnectError> {
+            Ok(())
+        }
+
+        fn evented(&self) -> &dyn mio::Evented {
+            &MockEvented
+        }
+    }
+
+    struct MockEvented;
+
+    impl mio::Evented for MockEvented {
+        fn register(
+            &self,
+            _poll: &mio::Poll,
+            _token: mio::Token,
+            _interest: mio::Ready,
+            _opts: mio::PollOpt,
+        ) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn reregister(
+            &self,
+            _poll: &mio::Poll,
+            _token: mio::Token,
+            _interest: mio::Ready,
+            _opts: mio::PollOpt,
+        ) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn deregister(&self, _poll: &mio::Poll) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+}
+
+
+#[cfg(feature = "network-peer-manager")]
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::time::Duration;
+
+    use protobuf::Message;
+
+    use crate::mesh::Mesh;
+    use crate::network::connection_manager::ConnectionManager;
+    use crate::network::peer_manager::PeerManager;
+    use crate::network::peer_manager::interconnect::PeerInterconnectBuilder;
+    use crate::protos::authorization::{
+        AuthorizationError, AuthorizationError_AuthorizationErrorType, AuthorizationMessage,
+        AuthorizedMessage, ConnectRequest, ConnectResponse, ConnectResponse_AuthorizationType,
+        TrustRequest,
+    };
+    use crate::protos::network::{NetworkMessage, NetworkMessageType};
+    use crate::transport::socket::TcpTransport;
+    use crate::transport::{
+        ConnectError, Connection, DisconnectError, RecvError, SendError, Transport,
+    };
+
+    #[test]
+    fn connect_request_dispatch() {
+        let mut tcp_transport = TcpTransport::default();
+        let mesh1 = Mesh::new(2, 2);
+        let mut cm = ConnectionManager::new(
+            mesh1.get_life_cycle(),
+            mesh1.get_sender(),
+            Box::new(tcp_transport),
+            Some(10),
+            None,
+        );
+        let connector = cm.start().unwrap();
+        let mut peer_manager = PeerManager::new(connector.clone(), None);
+        let peer_connector = peer_manager.start().expect("Cannot start peer_manager");
+
+        let mut dispatcher = Dispatcher::default();
+        let interconnect = PeerInterconnectBuilder::new()
+            .with_peer_connector(peer_connector.clone())
+            .with_message_receiver(mesh1.get_receiver())
+            .with_message_sender(mesh1.get_sender())
+            .with_message_shutdown(mesh1.get_matrix_shutdown())
+            .with_network_dispatcher(dispatcher)
+            .build()
+            .expect("Unable to build PeerInterconnect");
+
+        let network_sender = interconnect.new_network_sender();
+
+        let auth_mgr = AuthorizationManager::new(peer_connector, "mock_identity".into());
+
+        let mut tcp_transport = TcpTransport::default();
+        let mut listener = tcp_transport
+            .listen("tcp://localhost:0")
+            .expect("Cannot listen for connections");
+        let endpoint = listener.endpoint();
+
+        let dispatcher = create_authorization_dispatcher(auth_mgr, network_sender);
+
+        std::thread::spawn(move || {
+            let connection = listener.accept().expect("Cannot accept connection");
+            let temp_id = format!("temp-{}", connection.remote_endpoint());
+            connector
+                .add_inbound_connection(connection)
+                .expect("Unable to add peer");
+
+            let mut msg = ConnectRequest::new();
+            msg.set_handshake_mode(ConnectRequest_HandshakeMode::BIDIRECTIONAL);
+            let msg_bytes = msg.write_to_bytes().expect("Unable to serialize message");
+            assert_eq!(
+                Ok(()),
+                dispatcher.dispatch(
+                    temp_id.into(),
+                    &AuthorizationMessageType::CONNECT_REQUEST,
+                    msg_bytes
+                )
+            );
+        });
+
+        let mesh2 = Mesh::new(2, 2);
+        let connection = tcp_transport
+            .connect(&endpoint)
+            .expect("Unable to connect to inproc");
+        mesh2.add(connection, "mock_identity".to_string()).expect("Unable to add connection");
+
+        let message = mesh2
+            .recv()
+            .expect("Unable to receive message over the network");
+        let connect_req_msg: ConnectRequest = expect_auth_message(
+            AuthorizationMessageType::CONNECT_REQUEST,
+            message.payload(),
+        );
+        assert_eq!(
+            ConnectRequest_HandshakeMode::UNIDIRECTIONAL,
+            connect_req_msg.get_handshake_mode()
+        );
+
+        let network_message = mesh2
+            .recv()
+            .expect("Unable to receive message over the network");
+
+        let connect_res_msg: ConnectResponse = expect_auth_message(
+            AuthorizationMessageType::CONNECT_RESPONSE,
+            network_message.payload(),
+        );
+        assert_eq!(
+            vec![ConnectResponse_AuthorizationType::TRUST],
+            connect_res_msg.get_accepted_authorization_types().to_vec()
+        );
+
+        peer_manager.shutdown_and_wait();
+        cm.shutdown_and_wait();
+        interconnect.shutdown_and_wait();
+    }
+
+    // Test that a connect response is properly dispatched
+    // There should be a trust request sent to the responding peer
+    #[test]
+    fn connect_response_dispatch() {
+        let mut tcp_transport = TcpTransport::default();
+        let mesh1 = Mesh::new(2, 2);
+        let mut cm = ConnectionManager::new(
+            mesh1.get_life_cycle(),
+            mesh1.get_sender(),
+            Box::new(tcp_transport),
+            Some(10),
+            None,
+        );
+        let connector = cm.start().unwrap();
+        let mut peer_manager = PeerManager::new(connector.clone(), None);
+        let peer_connector = peer_manager.start().expect("Cannot start peer_manager");
+
+        let mut dispatcher = Dispatcher::default();
+        let interconnect = PeerInterconnectBuilder::new()
+            .with_peer_connector(peer_connector.clone())
+            .with_message_receiver(mesh1.get_receiver())
+            .with_message_sender(mesh1.get_sender())
+            .with_message_shutdown(mesh1.get_matrix_shutdown())
+            .with_network_dispatcher(dispatcher)
+            .build()
+            .expect("Unable to build PeerInterconnect");
+
+        let network_sender = interconnect.new_network_sender();
+
+        let auth_mgr = AuthorizationManager::new(peer_connector, "mock_identity".into());
+
+        let mut tcp_transport = TcpTransport::default();
+        let mut listener = tcp_transport
+            .listen("tcp://localhost:0")
+            .expect("Cannot listen for connections");
+        let endpoint = listener.endpoint();
+
+        let dispatcher = create_authorization_dispatcher(auth_mgr, network_sender);
+
+        std::thread::spawn(move || {
+            let connection = listener.accept().expect("Cannot accept connection");
+            let temp_id = format!("temp-{}", connection.remote_endpoint());
+            connector
+                .add_inbound_connection(connection)
+                .expect("Unable to add peer");
+
+            let mut msg = ConnectResponse::new();
+            msg.set_accepted_authorization_types(
+                vec![ConnectResponse_AuthorizationType::TRUST].into(),
+            );
+            let msg_bytes = msg.write_to_bytes().expect("Unable to serialize message");
+            assert_eq!(
+                Ok(()),
+                dispatcher.dispatch(
+                    temp_id.into(),
+                    &AuthorizationMessageType::CONNECT_RESPONSE,
+                    msg_bytes
+                )
+            );
+        });
+
+        let mesh2 = Mesh::new(2, 2);
+        let connection = tcp_transport
+            .connect(&endpoint)
+            .expect("Unable to connect to inproc");
+        mesh2.add(connection, "mock_identity".to_string()).expect("Unable to add connection");
+
+        let network_message = mesh2
+            .recv()
+            .expect("Unable to receive message over the network");
+
+        let trust_req: TrustRequest = expect_auth_message(
+            AuthorizationMessageType::TRUST_REQUEST,
+            network_message.payload(),
+        );
+        assert_eq!("mock_identity", trust_req.get_identity());
+
+        peer_manager.shutdown_and_wait();
+        cm.shutdown_and_wait();
+        interconnect.shutdown_and_wait();
+    }
+
+    // Test that the node can handle a trust response
+    //
+    // Currently broken
+    #[ignore]
+    #[test]
+    fn trust_request_dispatch() {
+        let mut tcp_transport = TcpTransport::default();
+        let mesh1 = Mesh::new(2, 2);
+        let mut cm = ConnectionManager::new(
+            mesh1.get_life_cycle(),
+            mesh1.get_sender(),
+            Box::new(tcp_transport),
+            Some(10),
+            None,
+        );
+        let connector = cm.start().unwrap();
+        let mut peer_manager = PeerManager::new(connector.clone(), None);
+        let peer_connector = peer_manager.start().expect("Cannot start peer_manager");
+
+        let mut dispatcher = Dispatcher::default();
+        let interconnect = PeerInterconnectBuilder::new()
+            .with_peer_connector(peer_connector.clone())
+            .with_message_receiver(mesh1.get_receiver())
+            .with_message_sender(mesh1.get_sender())
+            .with_message_shutdown(mesh1.get_matrix_shutdown())
+            .with_network_dispatcher(dispatcher)
+            .build()
+            .expect("Unable to build PeerInterconnect");
+
+        let network_sender = interconnect.new_network_sender();
+
+        let auth_mgr = AuthorizationManager::new(peer_connector, "mock_identity".into());
+
+        let mut tcp_transport = TcpTransport::default();
+        let mut listener = tcp_transport
+            .listen("tcp://localhost:0")
+            .expect("Cannot listen for connections");
+        let endpoint = listener.endpoint();
+
+        let dispatcher = create_authorization_dispatcher(auth_mgr, network_sender);
+
+        std::thread::spawn(move || {
+            let connection = listener.accept().expect("Cannot accept connection");
+            let temp_id = format!("temp-{}", connection.remote_endpoint());
+            connector
+                .add_inbound_connection(connection)
+                .expect("Unable to add peer");
+
+            // Begin the connection process, otherwise, the response will fail
+            let mut msg = ConnectRequest::new();
+            msg.set_handshake_mode(ConnectRequest_HandshakeMode::UNIDIRECTIONAL);
+            let msg_bytes = msg.write_to_bytes().expect("Unable to serialize message");
+            assert_eq!(
+                Ok(()),
+                dispatcher.dispatch(
+                    temp_id.clone().into(),
+                    &AuthorizationMessageType::CONNECT_REQUEST,
+                    msg_bytes
+                )
+            );
+
+            println!("SENT CONNECT REQUEST");
+            let mut trust_req = TrustRequest::new();
+            trust_req.set_identity("my_identity".into());
+            let msg_bytes = trust_req
+                .write_to_bytes()
+                .expect("Unable to serialize message");
+            assert_eq!(
+                Ok(()),
+                dispatcher.dispatch(
+                    temp_id.into(),
+                    &AuthorizationMessageType::TRUST_REQUEST,
+                    msg_bytes
+                )
+            );
+            println!("SENT Trust request");
+        });
+
+        let mesh2 = Mesh::new(2, 2);
+        let connection = tcp_transport
+            .connect(&endpoint)
+            .expect("Unable to connect to inproc");
+        mesh2.add(connection, "mock_identity".to_string()).expect("Unable to add connection");
+
+        let network_message = mesh2
+            .recv()
+            .expect("Unable to receive message over the network");
+
+        let _connect_res_msg: ConnectResponse = expect_auth_message(
+            AuthorizationMessageType::CONNECT_RESPONSE,
+            network_message.payload(),
+        );
+
+        println!("TEST");
+
+        let network_message = mesh2
+            .recv()
+            .expect("Unable to receive message over the network");
+
+        let _auth_msg: AuthorizedMessage = expect_auth_message(
+            AuthorizationMessageType::AUTHORIZE,
+            network_message.payload(),
+        );
+    }
+
+    // // Test that an AuthorizationError message is properly handled
+    // // 1. Configure the dispatcher
+    // // 2. Dispatch a connect message for a peer id
+    // // 3. Dispatch the error message for the same peer id
+    // // 4. Verify that the connection is dropped from the network.
+    // #[test]
+    // fn auth_error_dispatch() {
+    //     let (network, peer_id) = create_network_with_initial_temp_peer();
+    //
+    //     let auth_mgr = AuthorizationManager::new(network.clone(), "mock_pub_key".into());
+    //     let network_message_queue = sender::Builder::new()
+    //         .with_network(network.clone())
+    //         .build()
+    //         .expect("Unable to create queue");
+    //     let network_sender = network_message_queue.new_network_sender();
+    //
+    //     let mut tcp_transport = TcpTransport::default();
+    //     let mut listener = tcp_transport
+    //         .listen("tcp://localhost:0")
+    //         .expect("Cannot listen for connections");
+    //     let endpoint = listener.endpoint();
+    //     let dispatcher = create_authorization_dispatcher(auth_mgr, network_sender);
+    //
+    //     std::thread::spawn(move || {
+    //         let connection = listener.accept().expect("Cannot accept connection");
+    //         network
+    //             .add_peer(peer_id.clone(), connection)
+    //             .expect("Unable to add peer");
+    //         // Begin the connection process, otherwise, the response will fail
+    //         let mut msg = ConnectRequest::new();
+    //         msg.set_handshake_mode(ConnectRequest_HandshakeMode::UNIDIRECTIONAL);
+    //         let msg_bytes = msg.write_to_bytes().expect("Unable to serialize message");
+    //         assert_eq!(
+    //             Ok(()),
+    //             dispatcher.dispatch(
+    //                 peer_id.clone().into(),
+    //                 &AuthorizationMessageType::CONNECT_REQUEST,
+    //                 msg_bytes
+    //             )
+    //         );
+    //         let _network_msg = network.recv();
+    //
+    //         let mut error_message = AuthorizationError::new();
+    //         error_message
+    //             .set_error_type(AuthorizationError_AuthorizationErrorType::AUTHORIZATION_REJECTED);
+    //         error_message.set_error_message("Test Error!".into());
+    //         let msg_bytes = error_message
+    //             .write_to_bytes()
+    //             .expect("Unable to serialize error message");
+    //
+    //         assert_eq!(
+    //             Ok(()),
+    //             dispatcher.dispatch(
+    //                 peer_id.into(),
+    //                 &AuthorizationMessageType::AUTHORIZATION_ERROR,
+    //                 msg_bytes
+    //             )
+    //         );
+    //
+    //         assert_eq!(0, network.peer_ids().len());
+    //     });
+    //
+    //     let mesh2 = Mesh::new(1, 1);
+    //     let network2 = Network::new(mesh2.clone(), 0).unwrap();
+    //     let connection = tcp_transport
+    //         .connect(&endpoint)
+    //         .expect("Unable to connect to inproc");
+    //     network2
+    //         .add_peer("mock_identity".to_string(), connection)
+    //         .expect("Unable to add peer");
+    //
+    //     let network_message = network2
+    //         .recv()
+    //         .expect("Unable to receive message over the network");
+    //
+    //     let _connect_res_msg: ConnectResponse = expect_auth_message(
+    //         AuthorizationMessageType::CONNECT_RESPONSE,
+    //         network_message.payload(),
+    //     );
+    //
+    //     let timeout = Duration::from_secs(1);
+    //     if let Ok(_) = network2.recv_timeout(timeout) {
+    //         panic!("No messsages should have been sent")
+    //     }
+    // }
+
+    fn expect_auth_message<M: protobuf::Message>(
+        message_type: AuthorizationMessageType,
+        msg_bytes: &[u8],
+    ) -> M {
+        let network_msg: NetworkMessage =
+            protobuf::parse_from_bytes(msg_bytes).expect("Unable to parse network message");
+        assert_eq!(NetworkMessageType::AUTHORIZATION, network_msg.message_type);
+
+        let auth_msg: AuthorizationMessage = protobuf::parse_from_bytes(network_msg.get_payload())
+            .expect("Unable to parse auth message");
+
+        assert_eq!(message_type, auth_msg.message_type);
+
+        match protobuf::parse_from_bytes(auth_msg.get_payload()) {
+            Ok(msg) => msg,
+            Err(err) => panic!(
+                "unable to parse message for type {:?}: {:?}",
+                message_type, err
+            ),
+        }
     }
 
     struct MockConnectingTransport;

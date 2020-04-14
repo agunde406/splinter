@@ -328,6 +328,7 @@ where
                             break;
                         }
                     };
+                    println!("GOT {:?} {:?}", recipient, payload);
                     // convert recipient (peer_id) to connection_id
                     let connection_id = {
                         let mut peers = match peers.lock() {
@@ -345,6 +346,7 @@ where
                             .to_string();
 
                         if connection_id.is_empty() {
+                            println!("GETTING NEW PEERS");
                             *peers = match peer_connector.connection_ids() {
                                 Ok(peers) => peers,
                                 Err(err) => {
@@ -352,6 +354,8 @@ where
                                     break;
                                 }
                             };
+
+                            println!("NEW PEERS {:?}", peers);
 
                             connection_id = peers
                                 .get_by_key(&recipient)

@@ -16,12 +16,19 @@ pub mod handlers;
 
 use std::collections::HashMap;
 use std::fmt;
+#[cfg(not(feature = "network-peer-manager"))]
+use std::sync::mpsc::{channel, Receiver};
 use std::sync::{
-    mpsc::{channel, Receiver},
     Arc, Mutex,
 };
 
+#[cfg(not(feature = "network-peer-manager"))]
 use crate::network::Network;
+
+#[cfg(feature = "network-peer-manager")]
+use crate::network::peer_manager::{
+    PeerManagerConnector, PeerManagerNotification, PeerNotificationIter,
+};
 
 /// The states of a connection during authorization.
 #[derive(PartialEq, Debug, Clone)]
@@ -115,12 +122,16 @@ pub trait AuthorizationInquisitor: Send {
 #[derive(Clone)]
 pub struct AuthorizationManager {
     shared: Arc<Mutex<ManagedAuthorizations>>,
+    #[cfg(not(feature = "network-peer-manager"))]
     network: Network,
+    #[cfg(feature = "network-peer-manager")]
+    connector: PeerManagerConnector,
     identity: Identity,
 }
 
 impl AuthorizationManager {
     /// Constructs an AuthorizationManager
+    #[cfg(not(feature = "network-peer-manager"))]
     pub fn new(network: Network, identity: Identity) -> Self {
         let (disconnect_send, disconnect_receive) = channel();
         let shared = Arc::new(Mutex::new(ManagedAuthorizations::new(disconnect_receive)));
@@ -139,6 +150,26 @@ impl AuthorizationManager {
         }
     }
 
+    /// Constructs an AuthorizationManager
+    #[cfg(feature = "network-peer-manager")]
+    pub fn new(connector: PeerManagerConnector, identity: Identity) -> Self {
+        let subscriber = match connector.subscribe() {
+            Ok(subscriber) => subscriber,
+            Err(err) => {
+                error!("Error {}", err);
+                panic!("TODO remove this")
+            }
+        };
+
+        let shared = Arc::new(Mutex::new(ManagedAuthorizations::new(subscriber)));
+
+        AuthorizationManager {
+            shared,
+            connector,
+            identity,
+        }
+    }
+
     /// Transitions from one authorization state to another
     ///
     /// Errors
@@ -151,34 +182,75 @@ impl AuthorizationManager {
     ) -> Result<AuthorizationState, AuthorizationActionError> {
         let mut shared = mutex_lock_unwrap!(self.shared);
 
-        // drain the removals
-        let removals = shared.disconnect_receiver.try_iter().collect::<Vec<_>>();
-        for peer_id in removals.into_iter() {
-            shared.states.remove(&peer_id);
+        #[cfg(not(feature = "network-peer-manager"))]
+        {
+            // drain the removals
+            let removals = shared.disconnect_receiver.try_iter().collect::<Vec<_>>();
+            for peer_id in removals.into_iter() {
+                shared.states.remove(&peer_id);
+            }
+        }
+
+        #[cfg(feature = "network-peer-manager")]
+        {
+            while let Ok(Some(notification)) = shared.subscriber.try_next() {
+                match notification {
+                    PeerManagerNotification::Disconnected { peer } => {
+                        shared.states.remove(&peer);
+                    }
+                    _ => continue,
+                }
+            }
         }
 
         let cur_state = shared
             .states
             .get(peer_id)
             .unwrap_or(&AuthorizationState::Unknown);
+
         match *cur_state {
             AuthorizationState::Unknown => match action {
                 AuthorizationAction::Connecting => {
-                    if let Some(endpoint) = self.network.get_peer_endpoint(peer_id) {
-                        if endpoint.contains("inproc") {
-                            // Automatically authorize inproc connections
-                            debug!("Authorize inproc connection: {}", peer_id);
-                            shared
-                                .states
-                                .insert(peer_id.to_string(), AuthorizationState::Internal);
-                            Self::notify_callbacks(
-                                &shared.callbacks,
-                                peer_id,
-                                PeerAuthorizationState::Authorized,
-                            );
-                            return Ok(AuthorizationState::Internal);
+                    #[cfg(not(feature = "network-peer-manager"))]
+                    {
+                        if let Some(endpoint) = self.network.get_peer_endpoint(peer_id) {
+                            if endpoint.contains("inproc") {
+                                // Automatically authorize inproc connections
+                                debug!("Authorize inproc connection: {}", peer_id);
+                                shared
+                                    .states
+                                    .insert(peer_id.to_string(), AuthorizationState::Internal);
+                                Self::notify_callbacks(
+                                    &shared.callbacks,
+                                    peer_id,
+                                    PeerAuthorizationState::Authorized,
+                                );
+                                return Ok(AuthorizationState::Internal);
+                            }
                         }
                     }
+
+                    #[cfg(feature = "network-peer-manager")]
+                    {
+                        if let Ok(Some(endpoint)) =
+                            self.connector.get_peer_endpoint(peer_id.to_string())
+                        {
+                            if endpoint.contains("inproc") {
+                                // Automatically authorize inproc connections
+                                debug!("Authorize inproc connection: {}", peer_id);
+                                shared
+                                    .states
+                                    .insert(peer_id.to_string(), AuthorizationState::Internal);
+                                Self::notify_callbacks(
+                                    &shared.callbacks,
+                                    peer_id,
+                                    PeerAuthorizationState::Authorized,
+                                );
+                                return Ok(AuthorizationState::Internal);
+                            }
+                        }
+                    }
+
                     // Here the decision for Challenges will be made.
                     shared
                         .states
@@ -186,9 +258,16 @@ impl AuthorizationManager {
                     Ok(AuthorizationState::Connecting)
                 }
                 AuthorizationAction::Unauthorizing => {
+                    #[cfg(not(feature = "network-peer-manager"))]
                     self.network
                         .remove_connection(&peer_id.to_string())
                         .map_err(|_| AuthorizationActionError::ConnectionLost)?;
+
+                    #[cfg(feature = "network-peer-manager")]
+                    self.connector
+                        .unauthorize_peer(peer_id)
+                        .map_err(|_| AuthorizationActionError::ConnectionLost)?;
+
                     Ok(AuthorizationState::Unauthorized)
                 }
                 _ => Err(AuthorizationActionError::InvalidMessageOrder(
@@ -201,9 +280,17 @@ impl AuthorizationManager {
                 AuthorizationAction::TrustIdentifying(new_peer_id) => {
                     // Verify pub key allowed
                     shared.states.remove(peer_id);
+
+                    #[cfg(not(feature = "network-peer-manager"))]
                     self.network
                         .update_peer_id(peer_id.to_string(), new_peer_id.clone())
                         .map_err(|_| AuthorizationActionError::ConnectionLost)?;
+
+                    #[cfg(feature = "network-peer-manager")]
+                    self.connector
+                        .update_peer_ref(peer_id, &new_peer_id)
+                        .map_err(|_| AuthorizationActionError::ConnectionLost)?;
+
                     shared
                         .states
                         .insert(new_peer_id.clone(), AuthorizationState::Authorized);
@@ -216,9 +303,17 @@ impl AuthorizationManager {
                 }
                 AuthorizationAction::Unauthorizing => {
                     shared.states.remove(peer_id);
+
+                    #[cfg(not(feature = "network-peer-manager"))]
                     self.network
                         .remove_connection(&peer_id.to_string())
                         .map_err(|_| AuthorizationActionError::ConnectionLost)?;
+
+                    #[cfg(feature = "network-peer-manager")]
+                    self.connector
+                        .unauthorize_peer(peer_id)
+                        .map_err(|_| AuthorizationActionError::ConnectionLost)?;
+
                     Self::notify_callbacks(
                         &shared.callbacks,
                         peer_id,
@@ -230,9 +325,17 @@ impl AuthorizationManager {
             AuthorizationState::Authorized => match action {
                 AuthorizationAction::Unauthorizing => {
                     shared.states.remove(peer_id);
+
+                    #[cfg(not(feature = "network-peer-manager"))]
                     self.network
                         .remove_connection(&peer_id.to_string())
                         .map_err(|_| AuthorizationActionError::ConnectionLost)?;
+
+                    #[cfg(feature = "network-peer-manager")]
+                    self.connector
+                        .unauthorize_peer(peer_id)
+                        .map_err(|_| AuthorizationActionError::ConnectionLost)?;
+
                     Self::notify_callbacks(
                         &shared.callbacks,
                         peer_id,
@@ -283,10 +386,26 @@ impl AuthorizationInquisitor for AuthorizationManager {
     fn is_authorized(&self, peer_id: &str) -> bool {
         let mut shared = mutex_lock_unwrap!(self.shared);
 
-        // drain the removals
-        let removals = shared.disconnect_receiver.try_iter().collect::<Vec<_>>();
-        for peer_id in removals.into_iter() {
-            shared.states.remove(&peer_id);
+        #[cfg(not(feature = "network-peer-manager"))]
+        {
+            // drain the removals
+            let removals = shared.disconnect_receiver.try_iter().collect::<Vec<_>>();
+            for peer_id in removals.into_iter() {
+                shared.states.remove(&peer_id);
+            }
+        }
+
+        #[cfg(feature = "network-peer-manager")]
+        {
+            // drain the removals
+            while let Ok(Some(notification)) = shared.subscriber.try_next() {
+                match notification {
+                    PeerManagerNotification::Disconnected { peer } => {
+                        shared.states.remove(&peer);
+                    }
+                    _ => continue,
+                }
+            }
         }
 
         if let Some(state) = shared.states.get(peer_id) {
@@ -297,18 +416,38 @@ impl AuthorizationInquisitor for AuthorizationManager {
     }
 }
 
+#[cfg(not(feature = "network-peer-manager"))]
 struct ManagedAuthorizations {
     states: HashMap<String, AuthorizationState>,
     callbacks: Vec<Box<dyn AuthorizationCallback>>,
     disconnect_receiver: Receiver<String>,
 }
 
+#[cfg(not(feature = "network-peer-manager"))]
 impl ManagedAuthorizations {
     fn new(disconnect_receiver: Receiver<String>) -> Self {
         Self {
             states: Default::default(),
             callbacks: Default::default(),
             disconnect_receiver,
+        }
+    }
+}
+
+#[cfg(feature = "network-peer-manager")]
+struct ManagedAuthorizations {
+    states: HashMap<String, AuthorizationState>,
+    callbacks: Vec<Box<dyn AuthorizationCallback>>,
+    subscriber: PeerNotificationIter,
+}
+
+#[cfg(feature = "network-peer-manager")]
+impl ManagedAuthorizations {
+    fn new(subscriber: PeerNotificationIter) -> Self {
+        Self {
+            states: Default::default(),
+            callbacks: Default::default(),
+            subscriber,
         }
     }
 }
@@ -342,6 +481,7 @@ where
     }
 }
 
+#[cfg(not(feature = "network-peer-manager"))]
 #[cfg(test)]
 mod tests {
     use super::*;
