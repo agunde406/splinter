@@ -15,7 +15,7 @@
 use std::error::Error;
 use std::fmt;
 
-use crate::circuit;
+use crate::admin::store::error::AdminServiceStoreError;
 use crate::consensus::error::ProposalManagerError;
 use crate::orchestrator::InitializeServiceError;
 use crate::service::error::{ServiceError, ServiceSendError};
@@ -154,7 +154,7 @@ impl From<ServiceError> for ProposalManagerError {
 
 #[derive(Debug)]
 pub enum AdminSharedError {
-    SplinterStateError(circuit::SplinterStateError),
+    SplinterStateError(String),
     HashError(Sha256Error),
     InvalidMessageFormat(MarshallingError),
     NoPendingChanges,
@@ -172,9 +172,6 @@ pub enum AdminSharedError {
     /// An error occured while attempting to verify a payload's signature
     SignerError(signing::error::Error),
 
-    // Returned if a circuit cannot be added to splinter state
-    CommitError(String),
-    UpdateProposalsError(OpenProposalError),
     // An error occured while trying to negotiated protocol versions
     ServiceProtocolError(String),
 }
@@ -182,7 +179,7 @@ pub enum AdminSharedError {
 impl Error for AdminSharedError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            AdminSharedError::SplinterStateError(err) => Some(err),
+            AdminSharedError::SplinterStateError(_) => None,
             AdminSharedError::HashError(err) => Some(err),
             AdminSharedError::InvalidMessageFormat(err) => Some(err),
             AdminSharedError::NoPendingChanges => None,
@@ -197,8 +194,6 @@ impl Error for AdminSharedError {
             AdminSharedError::UnknownAction(_) => None,
             AdminSharedError::ValidationFailed(_) => None,
             AdminSharedError::SignerError(_) => None,
-            AdminSharedError::CommitError(_) => None,
-            AdminSharedError::UpdateProposalsError(err) => Some(err),
             AdminSharedError::UnableToAddSubscriber(_) => None,
             AdminSharedError::ServiceProtocolError(_) => None,
         }
@@ -208,7 +203,7 @@ impl Error for AdminSharedError {
 impl fmt::Display for AdminSharedError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            AdminSharedError::SplinterStateError(err) => write!(f, "{}", err),
+            AdminSharedError::SplinterStateError(msg) => write!(f, "error using store {}", msg),
             AdminSharedError::HashError(err) => write!(f, "received error while hashing: {}", err),
             AdminSharedError::InvalidMessageFormat(err) => {
                 write!(f, "invalid message format: {}", err)
@@ -231,10 +226,6 @@ impl fmt::Display for AdminSharedError {
             }
             AdminSharedError::ValidationFailed(msg) => write!(f, "validation failed: {}", msg),
             AdminSharedError::SignerError(ref msg) => write!(f, "Signing error: {}", msg),
-            AdminSharedError::CommitError(msg) => write!(f, "unable to commit circuit: {}", msg),
-            AdminSharedError::UpdateProposalsError(err) => {
-                write!(f, "received error while update open proposal: {}", err)
-            }
             AdminSharedError::UnableToAddSubscriber(msg) => {
                 write!(f, "unable to add admin service event subscriber: {}", msg)
             }
@@ -265,15 +256,9 @@ impl From<MarshallingError> for AdminSharedError {
     }
 }
 
-impl From<OpenProposalError> for AdminSharedError {
-    fn from(err: OpenProposalError) -> Self {
-        AdminSharedError::UpdateProposalsError(err)
-    }
-}
-
-impl From<circuit::SplinterStateError> for AdminSharedError {
-    fn from(err: circuit::SplinterStateError) -> Self {
-        AdminSharedError::SplinterStateError(err)
+impl From<AdminServiceStoreError> for AdminSharedError {
+    fn from(err: AdminServiceStoreError) -> Self {
+        AdminSharedError::SplinterStateError(err.to_string())
     }
 }
 
@@ -376,39 +361,5 @@ impl std::fmt::Display for MarshallingError {
 impl From<error::ProtobufError> for MarshallingError {
     fn from(err: error::ProtobufError) -> Self {
         MarshallingError::ProtobufError(err)
-    }
-}
-
-#[derive(Debug)]
-pub enum OpenProposalError {
-    WriteError(String),
-    InvalidMessageFormat(MarshallingError),
-}
-
-impl std::error::Error for OpenProposalError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            OpenProposalError::WriteError(_) => None,
-            OpenProposalError::InvalidMessageFormat(err) => Some(err),
-        }
-    }
-}
-
-impl std::fmt::Display for OpenProposalError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            OpenProposalError::WriteError(msg) => {
-                write!(f, "Unable to write to persisted storage: {}", msg)
-            }
-            OpenProposalError::InvalidMessageFormat(err) => {
-                write!(f, "Unable to convert circuit proposal: {}", err)
-            }
-        }
-    }
-}
-
-impl From<MarshallingError> for OpenProposalError {
-    fn from(err: MarshallingError) -> Self {
-        OpenProposalError::InvalidMessageFormat(err)
     }
 }
