@@ -30,6 +30,7 @@ use openssl::hash::{hash, MessageDigest};
 use protobuf::{self, Message};
 
 use crate::admin::store::AdminServiceStore;
+use crate::circuit::routing::{self, RoutingTableWriter};
 use crate::consensus::Proposal;
 use crate::hex::to_hex;
 use crate::keys::KeyPermissionManager;
@@ -171,6 +172,7 @@ impl AdminService {
         // The coordinator timeout for the two-phase commit consensus engine; if `None`, the
         // default value will be used (30 seconds).
         coordinator_timeout: Option<Duration>,
+        routing_table_writer: Box<dyn RoutingTableWriter>,
     ) -> Result<(Self, thread::JoinHandle<()>), ServiceError> {
         let coordinator_timeout =
             coordinator_timeout.unwrap_or_else(|| Duration::from_secs(DEFAULT_COORDINATOR_TIMEOUT));
@@ -193,6 +195,7 @@ impl AdminService {
                 signature_verifier,
                 key_verifier,
                 key_permission_manager,
+                routing_table_writer,
             )?)),
             orchestrator,
             coordinator_timeout,
@@ -269,7 +272,17 @@ impl AdminService {
         })?;
         let mut peer_refs = vec![];
         // start all services of the supported types
+        let mut writer = self
+            .admin_service_shared
+            .lock()
+            .map_err(|_| {
+                ServiceStartError::PoisonedLock("the admin shared lock was poisoned".into())
+            })?
+            .routing_table_writer();
+
         for circuit in circuits {
+            let mut routing_members = vec![];
+            let mut routing_services = vec![];
             // restart all peer in the circuit
             for member in circuit.members().iter() {
                 if member != &self.node_id {
@@ -283,6 +296,11 @@ impl AdminService {
                         } else {
                             info!("Unable to peer with {} at this time", member);
                         }
+
+                        routing_members.push(routing::CircuitNode::new(
+                            member.to_string(),
+                            node.endpoints().to_vec(),
+                        ))
                     } else {
                         error!("Missing node information for {}", member);
                     }
@@ -303,6 +321,13 @@ impl AdminService {
 
             // Start all services
             for service in services {
+                routing_services.push(routing::Service::new(
+                    service.service_id().to_string(),
+                    service.service_type().to_string(),
+                    service.node_id().to_string(),
+                    service.arguments().to_vec(),
+                ));
+
                 let service_definition = ServiceDefinition {
                     circuit: circuit.circuit_id().into(),
                     service_id: service.service_id().into(),
@@ -326,6 +351,18 @@ impl AdminService {
                     );
                 }
             }
+
+            writer
+                .add_circuit(
+                    circuit.circuit_id().to_string(),
+                    routing::Circuit::new(
+                        circuit.circuit_id().to_string(),
+                        routing_services,
+                        circuit.members().to_vec(),
+                    ),
+                    routing_members,
+                )
+                .map_err(|err| ServiceStartError::Internal(Box::new(err)))?;
         }
 
         let proposals = self
@@ -410,8 +447,6 @@ impl Service for AdminService {
             .set_proposal_sender(Some(proposal_sender));
 
         self.re_initialize_circuits()?;
-
-        // TODO deal with routing table
 
         self.admin_service_shared
             .lock()
@@ -735,6 +770,7 @@ mod tests {
     };
 
     use crate::admin::store::diesel::{migrations::run_sqlite_migrations, DieselAdminServiceStore};
+    use crate::circuit::routing::memory::RoutingTable;
     use crate::keys::insecure::AllowAllKeyPermissionManager;
     use crate::mesh::Mesh;
     use crate::network::auth::AuthorizationManager;
@@ -819,6 +855,9 @@ mod tests {
         let (orchestrator, _) = ServiceOrchestrator::new(vec![], orchestrator_connection, 1, 1, 1)
             .expect("failed to create orchestrator");
 
+        let table = RoutingTable::default();
+        let writer: Box<dyn RoutingTableWriter> = Box::new(table.clone());
+
         let (mut admin_service, _) = AdminService::new(
             "test-node".into(),
             orchestrator,
@@ -830,6 +869,7 @@ mod tests {
             Box::new(MockAdminKeyVerifier),
             Box::new(AllowAllKeyPermissionManager),
             None,
+            writer,
         )
         .expect("Service should have been created correctly");
 

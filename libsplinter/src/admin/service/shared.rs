@@ -26,6 +26,7 @@ use crate::admin::store::{
     AdminServiceStore, Circuit as StoreCircuit, CircuitNode, CircuitPredicate,
     CircuitProposal as StoreProposal, ProposalType, ProposedNode, Vote, VoteRecordBuilder,
 };
+use crate::circuit::routing::{self, RoutingTableWriter};
 use crate::consensus::{Proposal, ProposalId, ProposalUpdate};
 use crate::hex::to_hex;
 use crate::keys::KeyPermissionManager;
@@ -195,6 +196,7 @@ pub struct AdminServiceShared {
     proposal_sender: Option<Sender<ProposalUpdate>>,
 
     admin_service_status: AdminServiceStatus,
+    routing_table_writer: Box<dyn RoutingTableWriter>,
 }
 
 impl AdminServiceShared {
@@ -211,6 +213,7 @@ impl AdminServiceShared {
         signature_verifier: Box<dyn SignatureVerifier + Send>,
         key_verifier: Box<dyn AdminKeyVerifier>,
         key_permission_manager: Box<dyn KeyPermissionManager>,
+        routing_table_writer: Box<dyn RoutingTableWriter>,
     ) -> Result<Self, ServiceError> {
         let event_mailbox = Mailbox::new(DurableBTreeSet::new_boxed_with_bound(
             std::num::NonZeroUsize::new(DEFAULT_IN_MEMORY_EVENT_LIMIT).unwrap(),
@@ -240,6 +243,7 @@ impl AdminServiceShared {
             key_permission_manager,
             proposal_sender: None,
             admin_service_status: AdminServiceStatus::NotRunning,
+            routing_table_writer,
         })
     }
 
@@ -261,6 +265,10 @@ impl AdminServiceShared {
 
     pub fn pop_pending_circuit_payload(&mut self) -> Option<CircuitManagementPayload> {
         self.pending_circuit_payloads.pop_front()
+    }
+
+    pub fn routing_table_writer(&self) -> Box<dyn RoutingTableWriter> {
+        self.routing_table_writer.clone()
     }
 
     pub fn pending_consensus_proposals(
@@ -338,7 +346,6 @@ impl AdminServiceShared {
                 let circuit_proposal = circuit_proposal_context.circuit_proposal;
                 let action = circuit_proposal_context.action;
                 let circuit_id = circuit_proposal.get_circuit_id();
-                let circuit = circuit_proposal.get_circuit_proposal();
                 let mgmt_type = circuit_proposal
                     .get_circuit_proposal()
                     .circuit_management_type
@@ -348,6 +355,55 @@ impl AdminServiceShared {
                     Ok(CircuitProposalStatus::Accepted) => {
                         // commit new circuit
                         self.admin_store.upgrade_proposal_to_circuit(circuit_id)?;
+                        let circuit =
+                            self.admin_store.get_circuit(circuit_id)?.ok_or_else(|| {
+                                AdminSharedError::SplinterStateError(format!(
+                                    "Unable to get circuit that was just set: {}",
+                                    circuit_id
+                                ))
+                            })?;
+
+                        let routing_circuit = routing::Circuit::new(
+                            circuit.circuit_id().to_string(),
+                            circuit
+                                .roster()
+                                .iter()
+                                .map(|service| {
+                                    routing::Service::new(
+                                        service.service_id().to_string(),
+                                        service.service_type().to_string(),
+                                        service.node_id().to_string(),
+                                        service.arguments().to_vec(),
+                                    )
+                                })
+                                .collect(),
+                            circuit.members().to_vec(),
+                        );
+
+                        let routing_members = circuit_proposal
+                            .get_circuit_proposal()
+                            .get_members()
+                            .iter()
+                            .map(|node| {
+                                routing::CircuitNode::new(
+                                    node.get_node_id().to_string(),
+                                    node.get_endpoints().to_vec(),
+                                )
+                            })
+                            .collect::<Vec<routing::CircuitNode>>();
+
+                        self.routing_table_writer
+                            .add_circuit(
+                                circuit.circuit_id().to_string(),
+                                routing_circuit,
+                                routing_members,
+                            )
+                            .map_err(|_| {
+                                AdminSharedError::SplinterStateError(format!(
+                                    "Unable to add new circuit to routing table: {}",
+                                    circuit_id
+                                ))
+                            })?;
 
                         // send message about circuit acceptance
                         let circuit_proposal_proto =
@@ -370,12 +426,10 @@ impl AdminServiceShared {
 
                             let envelope_bytes =
                                 msg.write_to_bytes().map_err(MarshallingError::from)?;
-                            for member in circuit.members.iter() {
-                                if member.get_node_id() != self.node_id {
-                                    network_sender.send(
-                                        &admin_service_id(member.get_node_id()),
-                                        &envelope_bytes,
-                                    )?;
+                            for member in circuit.members().iter() {
+                                if member != &self.node_id {
+                                    network_sender
+                                        .send(&admin_service_id(member), &envelope_bytes)?;
                                 }
                             }
                         }
@@ -1798,6 +1852,7 @@ mod tests {
 
     use crate::admin::service::AdminKeyVerifierError;
     use crate::admin::store::diesel::{migrations::run_sqlite_migrations, DieselAdminServiceStore};
+    use crate::circuit::routing::memory::RoutingTable;
     use crate::keys::insecure::AllowAllKeyPermissionManager;
     use crate::mesh::{Envelope, Mesh};
     use crate::network::auth::AuthorizationManager;
@@ -1854,6 +1909,10 @@ mod tests {
         let (orchestrator, _) = ServiceOrchestrator::new(vec![], orchestrator_connection, 1, 1, 1)
             .expect("failed to create orchestrator");
         let store = setup_admin_service_store();
+
+        let table = RoutingTable::default();
+        let writer: Box<dyn RoutingTableWriter> = Box::new(table.clone());
+
         let mut shared = AdminServiceShared::new(
             "my_peer_id".into(),
             Arc::new(Mutex::new(orchestrator)),
@@ -1864,6 +1923,7 @@ mod tests {
             Box::new(HashVerifier),
             Box::new(MockAdminKeyVerifier::default()),
             Box::new(AllowAllKeyPermissionManager),
+            writer,
         )
         .unwrap();
 
@@ -1975,6 +2035,8 @@ mod tests {
         let (orchestrator, _) = ServiceOrchestrator::new(vec![], orchestrator_connection, 1, 1, 1)
             .expect("failed to create orchestrator");
         let store = setup_admin_service_store();
+        let table = RoutingTable::default();
+        let writer: Box<dyn RoutingTableWriter> = Box::new(table.clone());
         let mut shared = AdminServiceShared::new(
             "test-node".into(),
             Arc::new(Mutex::new(orchestrator)),
@@ -1985,6 +2047,7 @@ mod tests {
             Box::new(HashVerifier),
             Box::new(MockAdminKeyVerifier::default()),
             Box::new(AllowAllKeyPermissionManager),
+            writer,
         )
         .unwrap();
 
@@ -2063,6 +2126,9 @@ mod tests {
         let (mesh, cm, pm, peer_connector) = setup_peer_connector(None);
         let orchestrator = setup_orchestrator();
 
+        let table = RoutingTable::default();
+        let writer: Box<dyn RoutingTableWriter> = Box::new(table.clone());
+
         let admin_shared = AdminServiceShared::new(
             "node_a".into(),
             Arc::new(Mutex::new(orchestrator)),
@@ -2073,6 +2139,7 @@ mod tests {
             Box::new(HashVerifier),
             Box::new(MockAdminKeyVerifier::default()),
             Box::new(AllowAllKeyPermissionManager),
+            writer,
         )
         .unwrap();
         let circuit = setup_test_circuit();
@@ -2092,6 +2159,9 @@ mod tests {
         let (mesh, cm, pm, peer_connector) = setup_peer_connector(None);
         let orchestrator = setup_orchestrator();
 
+        let table = RoutingTable::default();
+        let writer: Box<dyn RoutingTableWriter> = Box::new(table.clone());
+
         let admin_shared = AdminServiceShared::new(
             "node_a".into(),
             Arc::new(Mutex::new(orchestrator)),
@@ -2102,6 +2172,7 @@ mod tests {
             Box::new(HashVerifier),
             Box::new(MockAdminKeyVerifier::new(false)),
             Box::new(AllowAllKeyPermissionManager),
+            writer,
         )
         .unwrap();
         let circuit = setup_test_circuit();
@@ -2120,6 +2191,9 @@ mod tests {
         let (mesh, cm, pm, peer_connector) = setup_peer_connector(None);
         let orchestrator = setup_orchestrator();
 
+        let table = RoutingTable::default();
+        let writer: Box<dyn RoutingTableWriter> = Box::new(table.clone());
+
         let admin_shared = AdminServiceShared::new(
             "node_a".into(),
             Arc::new(Mutex::new(orchestrator)),
@@ -2130,6 +2204,7 @@ mod tests {
             Box::new(HashVerifier),
             Box::new(MockAdminKeyVerifier::default()),
             Box::new(AllowAllKeyPermissionManager),
+            writer,
         )
         .unwrap();
         let circuit = setup_test_circuit();
@@ -2154,6 +2229,9 @@ mod tests {
         let (mesh, cm, pm, peer_connector) = setup_peer_connector(None);
         let orchestrator = setup_orchestrator();
 
+        let table = RoutingTable::default();
+        let writer: Box<dyn RoutingTableWriter> = Box::new(table.clone());
+
         let admin_shared = AdminServiceShared::new(
             "node_a".into(),
             Arc::new(Mutex::new(orchestrator)),
@@ -2164,6 +2242,7 @@ mod tests {
             Box::new(HashVerifier),
             Box::new(MockAdminKeyVerifier::default()),
             Box::new(AllowAllKeyPermissionManager),
+            writer,
         )
         .unwrap();
         let mut circuit = setup_test_circuit();
@@ -2188,6 +2267,9 @@ mod tests {
         let (mesh, cm, pm, peer_connector) = setup_peer_connector(None);
         let orchestrator = setup_orchestrator();
 
+        let table = RoutingTable::default();
+        let writer: Box<dyn RoutingTableWriter> = Box::new(table.clone());
+
         let admin_shared = AdminServiceShared::new(
             "node_a".into(),
             Arc::new(Mutex::new(orchestrator)),
@@ -2198,6 +2280,7 @@ mod tests {
             Box::new(HashVerifier),
             Box::new(MockAdminKeyVerifier::default()),
             Box::new(AllowAllKeyPermissionManager),
+            writer,
         )
         .unwrap();
         let mut circuit = setup_test_circuit();
@@ -2225,6 +2308,9 @@ mod tests {
         let (mesh, cm, pm, peer_connector) = setup_peer_connector(None);
         let orchestrator = setup_orchestrator();
 
+        let table = RoutingTable::default();
+        let writer: Box<dyn RoutingTableWriter> = Box::new(table.clone());
+
         let admin_shared = AdminServiceShared::new(
             "node_a".into(),
             Arc::new(Mutex::new(orchestrator)),
@@ -2235,6 +2321,7 @@ mod tests {
             Box::new(HashVerifier),
             Box::new(MockAdminKeyVerifier::default()),
             Box::new(AllowAllKeyPermissionManager),
+            writer,
         )
         .unwrap();
         let mut circuit = setup_test_circuit();
@@ -2259,6 +2346,9 @@ mod tests {
         let (mesh, cm, pm, peer_connector) = setup_peer_connector(None);
         let orchestrator = setup_orchestrator();
 
+        let table = RoutingTable::default();
+        let writer: Box<dyn RoutingTableWriter> = Box::new(table.clone());
+
         let admin_shared = AdminServiceShared::new(
             "node_a".into(),
             Arc::new(Mutex::new(orchestrator)),
@@ -2269,6 +2359,7 @@ mod tests {
             Box::new(HashVerifier),
             Box::new(MockAdminKeyVerifier::default()),
             Box::new(AllowAllKeyPermissionManager),
+            writer,
         )
         .unwrap();
         let mut circuit = setup_test_circuit();
@@ -2293,6 +2384,9 @@ mod tests {
         let (mesh, cm, pm, peer_connector) = setup_peer_connector(None);
         let orchestrator = setup_orchestrator();
 
+        let table = RoutingTable::default();
+        let writer: Box<dyn RoutingTableWriter> = Box::new(table.clone());
+
         let admin_shared = AdminServiceShared::new(
             "node_a".into(),
             Arc::new(Mutex::new(orchestrator)),
@@ -2303,6 +2397,7 @@ mod tests {
             Box::new(HashVerifier),
             Box::new(MockAdminKeyVerifier::default()),
             Box::new(AllowAllKeyPermissionManager),
+            writer,
         )
         .unwrap();
         let mut circuit = setup_test_circuit();
@@ -2332,6 +2427,9 @@ mod tests {
         let (mesh, cm, pm, peer_connector) = setup_peer_connector(None);
         let orchestrator = setup_orchestrator();
 
+        let table = RoutingTable::default();
+        let writer: Box<dyn RoutingTableWriter> = Box::new(table.clone());
+
         let admin_shared = AdminServiceShared::new(
             "node_a".into(),
             Arc::new(Mutex::new(orchestrator)),
@@ -2342,6 +2440,7 @@ mod tests {
             Box::new(HashVerifier),
             Box::new(MockAdminKeyVerifier::default()),
             Box::new(AllowAllKeyPermissionManager),
+            writer,
         )
         .unwrap();
         let mut circuit = setup_test_circuit();
@@ -2360,6 +2459,9 @@ mod tests {
         let (mesh, cm, pm, peer_connector) = setup_peer_connector(None);
         let orchestrator = setup_orchestrator();
 
+        let table = RoutingTable::default();
+        let writer: Box<dyn RoutingTableWriter> = Box::new(table.clone());
+
         let admin_shared = AdminServiceShared::new(
             "node_a".into(),
             Arc::new(Mutex::new(orchestrator)),
@@ -2370,6 +2472,7 @@ mod tests {
             Box::new(HashVerifier),
             Box::new(MockAdminKeyVerifier::default()),
             Box::new(AllowAllKeyPermissionManager),
+            writer,
         )
         .unwrap();
         let mut circuit = setup_test_circuit();
@@ -2390,6 +2493,9 @@ mod tests {
         let (mesh, cm, pm, peer_connector) = setup_peer_connector(None);
         let orchestrator = setup_orchestrator();
 
+        let table = RoutingTable::default();
+        let writer: Box<dyn RoutingTableWriter> = Box::new(table.clone());
+
         let admin_shared = AdminServiceShared::new(
             "node_a".into(),
             Arc::new(Mutex::new(orchestrator)),
@@ -2400,6 +2506,7 @@ mod tests {
             Box::new(HashVerifier),
             Box::new(MockAdminKeyVerifier::default()),
             Box::new(AllowAllKeyPermissionManager),
+            writer,
         )
         .unwrap();
         let mut circuit = setup_test_circuit();
@@ -2424,6 +2531,9 @@ mod tests {
         let (mesh, cm, pm, peer_connector) = setup_peer_connector(None);
         let orchestrator = setup_orchestrator();
 
+        let table = RoutingTable::default();
+        let writer: Box<dyn RoutingTableWriter> = Box::new(table.clone());
+
         let admin_shared = AdminServiceShared::new(
             "node_a".into(),
             Arc::new(Mutex::new(orchestrator)),
@@ -2434,6 +2544,7 @@ mod tests {
             Box::new(HashVerifier),
             Box::new(MockAdminKeyVerifier::default()),
             Box::new(AllowAllKeyPermissionManager),
+            writer,
         )
         .unwrap();
         let mut circuit = setup_test_circuit();
@@ -2465,6 +2576,9 @@ mod tests {
         let (mesh, cm, pm, peer_connector) = setup_peer_connector(None);
         let orchestrator = setup_orchestrator();
 
+        let table = RoutingTable::default();
+        let writer: Box<dyn RoutingTableWriter> = Box::new(table.clone());
+
         let admin_shared = AdminServiceShared::new(
             "node_a".into(),
             Arc::new(Mutex::new(orchestrator)),
@@ -2475,6 +2589,7 @@ mod tests {
             Box::new(HashVerifier),
             Box::new(MockAdminKeyVerifier::default()),
             Box::new(AllowAllKeyPermissionManager),
+            writer,
         )
         .unwrap();
         let mut circuit = setup_test_circuit();
@@ -2506,6 +2621,9 @@ mod tests {
         let (mesh, cm, pm, peer_connector) = setup_peer_connector(None);
         let orchestrator = setup_orchestrator();
 
+        let table = RoutingTable::default();
+        let writer: Box<dyn RoutingTableWriter> = Box::new(table.clone());
+
         let admin_shared = AdminServiceShared::new(
             "node_a".into(),
             Arc::new(Mutex::new(orchestrator)),
@@ -2516,6 +2634,7 @@ mod tests {
             Box::new(HashVerifier),
             Box::new(MockAdminKeyVerifier::default()),
             Box::new(AllowAllKeyPermissionManager),
+            writer,
         )
         .unwrap();
         let mut circuit = setup_test_circuit();
@@ -2535,6 +2654,9 @@ mod tests {
         let (mesh, cm, pm, peer_connector) = setup_peer_connector(None);
         let orchestrator = setup_orchestrator();
 
+        let table = RoutingTable::default();
+        let writer: Box<dyn RoutingTableWriter> = Box::new(table.clone());
+
         let admin_shared = AdminServiceShared::new(
             "node_a".into(),
             Arc::new(Mutex::new(orchestrator)),
@@ -2545,6 +2667,7 @@ mod tests {
             Box::new(HashVerifier),
             Box::new(MockAdminKeyVerifier::default()),
             Box::new(AllowAllKeyPermissionManager),
+            writer,
         )
         .unwrap();
         let mut circuit = setup_test_circuit();
@@ -2564,6 +2687,9 @@ mod tests {
         let (mesh, cm, pm, peer_connector) = setup_peer_connector(None);
         let orchestrator = setup_orchestrator();
 
+        let table = RoutingTable::default();
+        let writer: Box<dyn RoutingTableWriter> = Box::new(table.clone());
+
         let admin_shared = AdminServiceShared::new(
             "node_a".into(),
             Arc::new(Mutex::new(orchestrator)),
@@ -2574,6 +2700,7 @@ mod tests {
             Box::new(HashVerifier),
             Box::new(MockAdminKeyVerifier::default()),
             Box::new(AllowAllKeyPermissionManager),
+            writer,
         )
         .unwrap();
         let mut circuit = setup_test_circuit();
@@ -2601,6 +2728,9 @@ mod tests {
         let (mesh, cm, pm, peer_connector) = setup_peer_connector(None);
         let orchestrator = setup_orchestrator();
 
+        let table = RoutingTable::default();
+        let writer: Box<dyn RoutingTableWriter> = Box::new(table.clone());
+
         let admin_shared = AdminServiceShared::new(
             "node_a".into(),
             Arc::new(Mutex::new(orchestrator)),
@@ -2611,6 +2741,7 @@ mod tests {
             Box::new(HashVerifier),
             Box::new(MockAdminKeyVerifier::default()),
             Box::new(AllowAllKeyPermissionManager),
+            writer,
         )
         .unwrap();
         let mut circuit = setup_test_circuit();
@@ -2638,6 +2769,9 @@ mod tests {
         let (mesh, cm, pm, peer_connector) = setup_peer_connector(None);
         let orchestrator = setup_orchestrator();
 
+        let table = RoutingTable::default();
+        let writer: Box<dyn RoutingTableWriter> = Box::new(table.clone());
+
         let admin_shared = AdminServiceShared::new(
             "node_a".into(),
             Arc::new(Mutex::new(orchestrator)),
@@ -2648,6 +2782,7 @@ mod tests {
             Box::new(HashVerifier),
             Box::new(MockAdminKeyVerifier::default()),
             Box::new(AllowAllKeyPermissionManager),
+            writer,
         )
         .unwrap();
         let mut circuit = setup_test_circuit();
@@ -2675,6 +2810,9 @@ mod tests {
         let (mesh, cm, pm, peer_connector) = setup_peer_connector(None);
         let orchestrator = setup_orchestrator();
 
+        let table = RoutingTable::default();
+        let writer: Box<dyn RoutingTableWriter> = Box::new(table.clone());
+
         let admin_shared = AdminServiceShared::new(
             "node_a".into(),
             Arc::new(Mutex::new(orchestrator)),
@@ -2685,6 +2823,7 @@ mod tests {
             Box::new(HashVerifier),
             Box::new(MockAdminKeyVerifier::default()),
             Box::new(AllowAllKeyPermissionManager),
+            writer,
         )
         .unwrap();
         let mut circuit = setup_test_circuit();
@@ -2704,6 +2843,9 @@ mod tests {
         let (mesh, cm, pm, peer_connector) = setup_peer_connector(None);
         let orchestrator = setup_orchestrator();
 
+        let table = RoutingTable::default();
+        let writer: Box<dyn RoutingTableWriter> = Box::new(table.clone());
+
         let admin_shared = AdminServiceShared::new(
             "node_a".into(),
             Arc::new(Mutex::new(orchestrator)),
@@ -2714,6 +2856,7 @@ mod tests {
             Box::new(HashVerifier),
             Box::new(MockAdminKeyVerifier::default()),
             Box::new(AllowAllKeyPermissionManager),
+            writer,
         )
         .unwrap();
         let mut circuit = setup_test_circuit();
@@ -2733,6 +2876,9 @@ mod tests {
         let (mesh, cm, pm, peer_connector) = setup_peer_connector(None);
         let orchestrator = setup_orchestrator();
 
+        let table = RoutingTable::default();
+        let writer: Box<dyn RoutingTableWriter> = Box::new(table.clone());
+
         let admin_shared = AdminServiceShared::new(
             "node_a".into(),
             Arc::new(Mutex::new(orchestrator)),
@@ -2743,6 +2889,7 @@ mod tests {
             Box::new(HashVerifier),
             Box::new(MockAdminKeyVerifier::default()),
             Box::new(AllowAllKeyPermissionManager),
+            writer,
         )
         .unwrap();
         let mut circuit = setup_test_circuit();
@@ -2762,6 +2909,9 @@ mod tests {
         let (mesh, cm, pm, peer_connector) = setup_peer_connector(None);
         let orchestrator = setup_orchestrator();
 
+        let table = RoutingTable::default();
+        let writer: Box<dyn RoutingTableWriter> = Box::new(table.clone());
+
         let admin_shared = AdminServiceShared::new(
             "node_a".into(),
             Arc::new(Mutex::new(orchestrator)),
@@ -2772,6 +2922,7 @@ mod tests {
             Box::new(HashVerifier),
             Box::new(MockAdminKeyVerifier::default()),
             Box::new(AllowAllKeyPermissionManager),
+            writer,
         )
         .unwrap();
         let mut circuit = setup_test_circuit();
@@ -2791,6 +2942,9 @@ mod tests {
         let (mesh, cm, pm, peer_connector) = setup_peer_connector(None);
         let orchestrator = setup_orchestrator();
 
+        let table = RoutingTable::default();
+        let writer: Box<dyn RoutingTableWriter> = Box::new(table.clone());
+
         let admin_shared = AdminServiceShared::new(
             "node_a".into(),
             Arc::new(Mutex::new(orchestrator)),
@@ -2801,6 +2955,7 @@ mod tests {
             Box::new(HashVerifier),
             Box::new(MockAdminKeyVerifier::default()),
             Box::new(AllowAllKeyPermissionManager),
+            writer,
         )
         .unwrap();
         let mut circuit = setup_test_circuit();
@@ -2820,6 +2975,9 @@ mod tests {
         let (mesh, cm, pm, peer_connector) = setup_peer_connector(None);
         let orchestrator = setup_orchestrator();
 
+        let table = RoutingTable::default();
+        let writer: Box<dyn RoutingTableWriter> = Box::new(table.clone());
+
         let admin_shared = AdminServiceShared::new(
             "node_a".into(),
             Arc::new(Mutex::new(orchestrator)),
@@ -2830,6 +2988,7 @@ mod tests {
             Box::new(HashVerifier),
             Box::new(MockAdminKeyVerifier::default()),
             Box::new(AllowAllKeyPermissionManager),
+            writer,
         )
         .unwrap();
         let circuit = setup_test_circuit();
@@ -2855,6 +3014,9 @@ mod tests {
         let (mesh, cm, pm, peer_connector) = setup_peer_connector(None);
         let orchestrator = setup_orchestrator();
 
+        let table = RoutingTable::default();
+        let writer: Box<dyn RoutingTableWriter> = Box::new(table.clone());
+
         let admin_shared = AdminServiceShared::new(
             "node_a".into(),
             Arc::new(Mutex::new(orchestrator)),
@@ -2865,6 +3027,7 @@ mod tests {
             Box::new(HashVerifier),
             Box::new(MockAdminKeyVerifier::new(false)),
             Box::new(AllowAllKeyPermissionManager),
+            writer,
         )
         .unwrap();
         let circuit = setup_test_circuit();
@@ -2889,6 +3052,9 @@ mod tests {
         let (mesh, cm, pm, peer_connector) = setup_peer_connector(None);
         let orchestrator = setup_orchestrator();
 
+        let table = RoutingTable::default();
+        let writer: Box<dyn RoutingTableWriter> = Box::new(table.clone());
+
         let admin_shared = AdminServiceShared::new(
             "node_a".into(),
             Arc::new(Mutex::new(orchestrator)),
@@ -2899,6 +3065,7 @@ mod tests {
             Box::new(HashVerifier),
             Box::new(MockAdminKeyVerifier::default()),
             Box::new(AllowAllKeyPermissionManager),
+            writer,
         )
         .unwrap();
         let circuit = setup_test_circuit();
@@ -2923,6 +3090,9 @@ mod tests {
         let (mesh, cm, pm, peer_connector) = setup_peer_connector(None);
         let orchestrator = setup_orchestrator();
 
+        let table = RoutingTable::default();
+        let writer: Box<dyn RoutingTableWriter> = Box::new(table.clone());
+
         let admin_shared = AdminServiceShared::new(
             "node_a".into(),
             Arc::new(Mutex::new(orchestrator)),
@@ -2933,6 +3103,7 @@ mod tests {
             Box::new(HashVerifier),
             Box::new(MockAdminKeyVerifier::default()),
             Box::new(AllowAllKeyPermissionManager),
+            writer,
         )
         .unwrap();
         let circuit = setup_test_circuit();
@@ -2965,6 +3136,9 @@ mod tests {
         let (mesh, cm, pm, peer_connector) = setup_peer_connector(None);
         let orchestrator = setup_orchestrator();
 
+        let table = RoutingTable::default();
+        let writer: Box<dyn RoutingTableWriter> = Box::new(table.clone());
+
         let admin_shared = AdminServiceShared::new(
             "node_a".into(),
             Arc::new(Mutex::new(orchestrator)),
@@ -2975,6 +3149,7 @@ mod tests {
             Box::new(HashVerifier),
             Box::new(MockAdminKeyVerifier::default()),
             Box::new(AllowAllKeyPermissionManager),
+            writer,
         )
         .unwrap();
         let circuit = setup_test_circuit();
@@ -3002,6 +3177,9 @@ mod tests {
         let (mesh, cm, pm, peer_connector) = setup_peer_connector(None);
         let orchestrator = setup_orchestrator();
 
+        let table = RoutingTable::default();
+        let writer: Box<dyn RoutingTableWriter> = Box::new(table.clone());
+
         let shared = AdminServiceShared::new(
             "node_a".into(),
             Arc::new(Mutex::new(orchestrator)),
@@ -3012,6 +3190,7 @@ mod tests {
             Box::new(HashVerifier),
             Box::new(MockAdminKeyVerifier::default()),
             Box::new(AllowAllKeyPermissionManager),
+            writer,
         )
         .unwrap();
 
@@ -3050,6 +3229,9 @@ mod tests {
         let (mesh, cm, pm, peer_connector) = setup_peer_connector(None);
         let orchestrator = setup_orchestrator();
 
+        let table = RoutingTable::default();
+        let writer: Box<dyn RoutingTableWriter> = Box::new(table.clone());
+
         let shared = AdminServiceShared::new(
             "node_a".into(),
             Arc::new(Mutex::new(orchestrator)),
@@ -3060,6 +3242,7 @@ mod tests {
             Box::new(HashVerifier),
             Box::new(MockAdminKeyVerifier::default()),
             Box::new(AllowAllKeyPermissionManager),
+            writer,
         )
         .unwrap();
 
@@ -3099,6 +3282,9 @@ mod tests {
         let (mesh, cm, pm, peer_connector) = setup_peer_connector(None);
         let orchestrator = setup_orchestrator();
 
+        let table = RoutingTable::default();
+        let writer: Box<dyn RoutingTableWriter> = Box::new(table.clone());
+
         let shared = AdminServiceShared::new(
             "node_a".into(),
             Arc::new(Mutex::new(orchestrator)),
@@ -3109,6 +3295,7 @@ mod tests {
             Box::new(HashVerifier),
             Box::new(MockAdminKeyVerifier::default()),
             Box::new(AllowAllKeyPermissionManager),
+            writer,
         )
         .unwrap();
 
@@ -3150,6 +3337,9 @@ mod tests {
         let (mesh, cm, pm, peer_connector) = setup_peer_connector(None);
         let orchestrator = setup_orchestrator();
 
+        let table = RoutingTable::default();
+        let writer: Box<dyn RoutingTableWriter> = Box::new(table.clone());
+
         let shared = AdminServiceShared::new(
             "node_a".into(),
             Arc::new(Mutex::new(orchestrator)),
@@ -3160,6 +3350,7 @@ mod tests {
             Box::new(HashVerifier),
             Box::new(MockAdminKeyVerifier::default()),
             Box::new(AllowAllKeyPermissionManager),
+            writer,
         )
         .unwrap();
 
