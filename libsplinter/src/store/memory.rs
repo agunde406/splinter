@@ -94,4 +94,9 @@ impl StoreFactory for MemoryStoreFactory {
     fn get_biome_oauth_user_store(&self) -> Box<dyn crate::biome::OAuthUserStore> {
         Box::new(self.biome_oauth_user_store.clone())
     }
+
+    #[cfg(feature = "admin-service-store-postgres")]
+    fn get_admin_service_store(&self) -> Box<dyn crate::admin::store::AdminServiceStore> {
+        unimplemented!()
+    }
 }

@@ -59,6 +59,9 @@ features = [
   "rest-api",
   "rest-api-actix",
   "sawtooth-signing-compat",
+  "admin-service-store",
+  "admin-service-store-postgres",
+  "routing-table"
 ]
 
 [features]

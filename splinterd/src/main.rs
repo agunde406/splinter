@@ -169,8 +169,6 @@ fn main() {
           "Unique ID for the node ")
         (@arg display_name: --("display-name") +takes_value
           "Human-readable name for the node")
-        (@arg storage: --("storage") +takes_value
-          "Storage type used for the node; defaults to yaml")
         (@arg no_tls:  --("no-tls") "Turn off tls configuration")
         (@arg registry_auto_refresh: --("registry-auto-refresh") +takes_value
             "How often remote Splinter registries should attempt to fetch upstream changes in the \
@@ -301,6 +299,13 @@ fn main() {
             Arg::with_name("state_dir")
                 .long("state-dir")
                 .help("Storage directory when storage is YAML")
+                .takes_value(true),
+        )
+        .arg(
+            Arg::with_name("storage")
+                .long("storage")
+                .help("Storage type used for the node; defaults to yaml")
+                .hidden()
                 .takes_value(true),
         );
 
