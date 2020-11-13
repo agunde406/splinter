@@ -21,20 +21,20 @@ pub enum UserStoreError {
     /// Represents CRUD operations failures
     OperationError {
         context: String,
-        source: Box<dyn Error>,
+        source: Box<dyn Error + Send>,
     },
     /// Represents database query failures
     QueryError {
         context: String,
-        source: Box<dyn Error>,
+        source: Box<dyn Error + Send>,
     },
     /// Represents general failures in the database
     StorageError {
         context: String,
-        source: Option<Box<dyn Error>>,
+        source: Option<Box<dyn Error + Send>>,
     },
     /// Represents an issue connecting to the database
-    ConnectionError(Box<dyn Error>),
+    ConnectionError(Box<dyn Error + Send>),
     NotFoundError(String),
 }
 

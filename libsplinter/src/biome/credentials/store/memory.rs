@@ -69,7 +69,7 @@ impl CredentialsStore for MemoryCredentialsStore {
                 .build()
                 .map_err(|err| CredentialsStoreError::OperationError {
                     context: "Failed to build updated credentials".to_string(),
-                    source: err.into(),
+                    source: Box::new(err),
                 })?;
             inner.insert(user_id.into(), new_credentials);
             Ok(())

@@ -23,7 +23,7 @@ use std::time::Duration;
 /// This error can be handled by retrying, usually in a loop with a small delay.
 #[derive(Debug)]
 pub struct ResourceTemporarilyUnavailableError {
-    source: Box<dyn error::Error>,
+    source: Box<dyn error::Error + Send>,
     retry_duration_hint: Option<Duration>,
 }
 
@@ -42,7 +42,7 @@ impl ResourceTemporarilyUnavailableError {
     /// let rtu_error = ResourceTemporarilyUnavailableError::from_source(Box::new(io_err));
     /// assert_eq!(format!("{}", rtu_error), "io error");
     /// ```
-    pub fn from_source(source: Box<dyn error::Error>) -> Self {
+    pub fn from_source(source: Box<dyn error::Error + Send>) -> Self {
         Self {
             source,
             retry_duration_hint: None,
@@ -71,7 +71,7 @@ impl ResourceTemporarilyUnavailableError {
     /// assert_eq!(format!("{}", rtu_error), "io error");
     /// ```
     pub fn from_source_with_hint(
-        source: Box<dyn error::Error>,
+        source: Box<dyn error::Error + Send>,
         retry_duration_hint: Duration,
     ) -> Self {
         Self {

@@ -52,7 +52,7 @@ impl fmt::Display for ConstraintViolationType {
 /// example, be a memory or file-backed implementation of a store.
 pub struct ConstraintViolationError {
     violation_type: ConstraintViolationType,
-    source: Option<Box<dyn error::Error>>,
+    source: Option<Box<dyn error::Error + Send>>,
 }
 
 impl ConstraintViolationError {
@@ -97,7 +97,7 @@ impl ConstraintViolationError {
     /// ```
     pub fn from_source_with_violation_type(
         violation_type: ConstraintViolationType,
-        source: Box<dyn error::Error>,
+        source: Box<dyn error::Error + Send>,
     ) -> Self {
         Self {
             violation_type,

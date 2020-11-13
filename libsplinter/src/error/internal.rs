@@ -19,7 +19,7 @@ use std::fmt;
 
 struct Source {
     prefix: Option<String>,
-    source: Box<dyn error::Error>,
+    source: Box<dyn error::Error + Send>,
 }
 
 /// An error which is returned for reasons internal to the function.
@@ -48,7 +48,7 @@ impl InternalError {
     /// let internal_error = InternalError::from_source(Box::new(io_err));
     /// assert_eq!(format!("{}", internal_error), "io error");
     /// ```
-    pub fn from_source(source: Box<dyn error::Error>) -> Self {
+    pub fn from_source(source: Box<dyn error::Error + Send>) -> Self {
         Self {
             message: None,
             source: Some(Source {
@@ -72,7 +72,7 @@ impl InternalError {
     /// let internal_error = InternalError::from_source_with_message(Box::new(io_err), "oops".to_string());
     /// assert_eq!(format!("{}", internal_error), "oops");
     /// ```
-    pub fn from_source_with_message(source: Box<dyn error::Error>, message: String) -> Self {
+    pub fn from_source_with_message(source: Box<dyn error::Error + Send>, message: String) -> Self {
         Self {
             message: Some(message),
             source: Some(Source {
@@ -97,7 +97,7 @@ impl InternalError {
     /// let internal_error = InternalError::from_source_with_prefix(Box::new(io_err), "Could not open file".to_string());
     /// assert_eq!(format!("{}", internal_error), "Could not open file: io error");
     /// ```
-    pub fn from_source_with_prefix(source: Box<dyn error::Error>, prefix: String) -> Self {
+    pub fn from_source_with_prefix(source: Box<dyn error::Error + Send>, prefix: String) -> Self {
         Self {
             message: None,
             source: Some(Source {

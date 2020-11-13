@@ -23,21 +23,21 @@ pub enum CredentialsStoreError {
     /// Represents CRUD operations failures
     OperationError {
         context: String,
-        source: Box<dyn Error>,
+        source: Box<dyn Error + Send>,
     },
     /// Represents database query failures
     QueryError {
         context: String,
-        source: Box<dyn Error>,
+        source: Box<dyn Error + Send>,
     },
     /// Represents general failures in the database
     StorageError {
         context: String,
-        source: Option<Box<dyn Error>>,
+        source: Option<Box<dyn Error + Send>>,
     },
 
     /// Represents an issue connecting to the database
-    ConnectionError(Box<dyn Error>),
+    ConnectionError(Box<dyn Error + Send>),
     /// Represents error occured when an attempt is made to add a new credential with a
     /// username that already exists in the database
     DuplicateError(String),
@@ -108,9 +108,9 @@ pub enum CredentialsBuilderError {
     /// Returned when a required field was not set
     MissingRequiredField(String),
     /// Returned when an error occurs building the credentials
-    BuildError(Box<dyn Error>),
+    BuildError(Box<dyn Error + Send>),
     /// Returned when an error occurs while attempting to encrypt the password
-    EncryptionError(Box<dyn Error>),
+    EncryptionError(Box<dyn Error + Send>),
 }
 
 impl Error for CredentialsBuilderError {
@@ -149,7 +149,7 @@ impl From<BcryptError> for CredentialsBuilderError {
 #[derive(Debug)]
 pub enum CredentialsError {
     /// Returned when an error occurs while attempting to verify the password
-    VerificationError(Box<dyn Error>),
+    VerificationError(Box<dyn Error + Send>),
 }
 
 impl Error for CredentialsError {

@@ -19,7 +19,7 @@ use std::fmt;
 
 use crate::error::InternalError;
 
-type ConstraintViolation = Box<dyn Error>;
+type ConstraintViolation = Box<dyn Error + Send>;
 
 /// Errors that may occur during OAuthUserStore operations.
 #[derive(Debug)]
