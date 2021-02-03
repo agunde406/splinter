@@ -78,6 +78,9 @@ ci-test-gameroom: test-gameroom
 clean:
     cargo clean
 
+clean-metrics:
+    docker-compose -f docker/metrics/docker-compose.yaml down -v
+
 lint:
     #!/usr/bin/env sh
     set -e
@@ -99,6 +102,14 @@ lint-client:
     set -e
     cd examples/gameroom/gameroom-app
     npm run lint
+
+metrics:
+    docker-compose -f docker/metrics/docker-compose.yaml down;
+    docker-compose \
+        -f docker/metrics/docker-compose.yaml \
+        up \
+        -d \
+        --build;
 
 test:
     #!/usr/bin/env sh
