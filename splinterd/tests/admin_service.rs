@@ -14,5 +14,9 @@
 
 //! Splinter integration tests.
 
+#[cfg(feature = "node")]
+#[macro_use]
+extern crate splinter;
+
 mod admin;
 mod framework;

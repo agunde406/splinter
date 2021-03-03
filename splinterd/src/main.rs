@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(feature = "shutdown")]
+#[macro_use]
+extern crate splinter;
+
 #[macro_use]
 extern crate log;
 #[macro_use]

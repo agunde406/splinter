@@ -133,13 +133,13 @@ impl ServiceOrchestrator {
     }
 
     #[cfg(feature = "shutdown")]
-    pub fn take_shutdown_handle(&mut self) -> Option<Box<dyn ShutdownHandle>> {
+    pub fn take_shutdown_handle(&mut self) -> Option<ServiceOrchestratorShutdownHandle> {
         let join_handles = self.join_handles.take()?;
-        Some(Box::new(ServiceOrchestratorShutdownHandle {
+        Some(ServiceOrchestratorShutdownHandle {
             services: Arc::clone(&self.services),
-            join_handles: Some(join_handles),
+            join_handles,
             running: Arc::clone(&self.running),
-        }) as Box<dyn ShutdownHandle>)
+        })
     }
 
     /// Initialize (create and start) a service according to the specified definition. The
@@ -345,9 +345,9 @@ impl<T> JoinHandles<T> {
 }
 
 #[cfg(feature = "shutdown")]
-struct ServiceOrchestratorShutdownHandle {
+pub struct ServiceOrchestratorShutdownHandle {
     services: Arc<Mutex<HashMap<ServiceDefinition, ManagedService>>>,
-    join_handles: Option<JoinHandles<Result<(), OrchestratorError>>>,
+    join_handles: JoinHandles<Result<(), OrchestratorError>>,
     running: Arc<AtomicBool>,
 }
 
@@ -376,23 +376,21 @@ impl ShutdownHandle for ServiceOrchestratorShutdownHandle {
         self.running.store(false, Ordering::SeqCst);
     }
 
-    fn wait_for_shutdown(&mut self) -> Result<(), InternalError> {
-        if let Some(join_handles) = self.join_handles.take() {
-            match join_handles.join_all() {
-                Ok(results) => {
-                    results
-                        .into_iter()
-                        .filter(Result::is_err)
-                        .map(Result::unwrap_err)
-                        .for_each(|err| {
-                            error!("{}", err);
-                        });
-                }
-                Err(_) => {
-                    return Err(crate::error::InternalError::with_message(
-                        "Unable to join service processor threads".into(),
-                    ));
-                }
+    fn wait_for_shutdown(self) -> Result<(), InternalError> {
+        match self.join_handles.join_all() {
+            Ok(results) => {
+                results
+                    .into_iter()
+                    .filter(Result::is_err)
+                    .map(Result::unwrap_err)
+                    .for_each(|err| {
+                        error!("{}", err);
+                    });
+            }
+            Err(_) => {
+                return Err(crate::error::InternalError::with_message(
+                    "Unable to join service processor threads".into(),
+                ));
             }
         }
 

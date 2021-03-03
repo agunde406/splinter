@@ -56,8 +56,8 @@ impl ShutdownHandle for Node {
         }
     }
 
-    fn wait_for_shutdown(&mut self) -> Result<(), InternalError> {
-        match self.rest_api_variant.take() {
+    fn wait_for_shutdown(self) -> Result<(), InternalError> {
+        match self.rest_api_variant {
             Some(NodeRestApiVariant::ActixWeb1(shutdown_handle, join_handle)) => {
                 shutdown_handle
                     .shutdown()
@@ -69,7 +69,7 @@ impl ShutdownHandle for Node {
                 })?;
                 Ok(())
             }
-            Some(NodeRestApiVariant::ActixWeb3(mut rest_api)) => {
+            Some(NodeRestApiVariant::ActixWeb3(rest_api)) => {
                 rest_api.wait_for_shutdown()?;
                 Ok(())
             }

@@ -53,6 +53,8 @@ pub use factory::ServiceFactory;
 pub use processor::registry::StandardServiceNetworkRegistry;
 pub use processor::JoinHandles;
 pub use processor::ServiceProcessor;
+#[cfg(feature = "shutdown")]
+pub use processor::ServiceProcessorShutdownHandle;
 pub use processor::ServiceProcessorBuilder;
 #[cfg(not(feature = "shutdown"))]
 pub use processor::ShutdownHandle;
