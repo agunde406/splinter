@@ -12,14 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 use std::collections::HashMap;
-use std::sync::mpsc::{channel, Sender};
-use std::thread;
 
 use chrono::{DateTime, Utc};
 use influxdb::InfluxDbWriteable;
 use influxdb::{Client, Query, Timestamp, WriteQuery};
 use metrics_lib::{Key, Recorder, SetRecorderError};
 use tokio::runtime::Runtime;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+use tokio::task::JoinHandle;
 
 use crate::error::InternalError;
 use crate::threading::lifecycle::ShutdownHandle;
@@ -46,90 +46,97 @@ struct Histogram {
 }
 
 enum MetricRequest {
-    Counter { key: String, value: u64 },
-    Gauge { key: String, value: i64 },
-    Histogram { key: String, value: u64 },
+    Counter {
+        key: String,
+        value: u64,
+        time: DateTime<Utc>,
+    },
+    Gauge {
+        key: String,
+        value: i64,
+        time: DateTime<Utc>,
+    },
+    Histogram {
+        key: String,
+        value: u64,
+        time: DateTime<Utc>,
+    },
     Shutdown,
 }
 
 pub struct InfluxRecorder {
-    join_handle: thread::JoinHandle<()>,
-    sender: Sender<MetricRequest>,
+    sender: UnboundedSender<MetricRequest>,
+    join_handle: JoinHandle<()>,
+    rt: Runtime,
 }
 
 impl InfluxRecorder {
-    // TODO pass values to client in inner
+    // TODO pass values to client
     pub fn new() -> Result<Self, InternalError> {
-        let (sender, recv) = channel();
-        let thread_builder = thread::Builder::new().name("MetricReactor".into());
+        let (sender, mut recv) = unbounded_channel();
         let mut rt = Runtime::new().map_err(|err| {
             InternalError::with_message("Unable to start metrics runtime".to_string())
         })?;
-        let join_handle = thread_builder
-            .spawn(move || {
-                let client =
-                    Client::new("http://localhost:8086", "metrics").with_auth("admin", "foobar");
-                let mut counters: HashMap<String, Counter> = HashMap::new();
 
-                loop {
-                    match recv.recv() {
-                        Ok(MetricRequest::Counter { key, value }) => {
-                            let counter = {
-                                if let Some(mut counter) = counters.get_mut(&key) {
-                                    counter.value += 1;
-                                    counter.time = Utc::now();
-                                    counter.clone()
-                                } else {
-                                    let counter = Counter {
-                                        time: Utc::now(),
-                                        key: key.to_string(),
-                                        value,
-                                    };
-                                    counters.insert(key.to_string(), counter.clone());
-                                    counter
-                                }
-                            };
+        let client =
+            Client::new("http://localhost:8086", "metrics").with_auth("admin", "foobar");
 
-                            let query = counter.into_query(key);
-                            // block on future, cannot call spawn because future does not live
-                            // long enough because query takes a reference
-                            rt.block_on(client.query(&query));
-                        }
-                        Ok(MetricRequest::Gauge { key, value }) => {
-                            let gauge = Gauge {
-                                time: Utc::now(),
-                                key: key.to_string(),
-                                value,
-                            };
-                            let query = gauge.into_query(key);
-                            // block on future, cannot call spawn because future does not live
-                            // long enough because query takes a reference
-                            rt.block_on(client.query(&query));
-                        }
-                        Ok(MetricRequest::Histogram { key, value }) => {
-                            let histogram = Histogram {
-                                time: Utc::now(),
-                                key: key.to_string(),
-                                value,
-                            };
-                            let query = histogram.into_query(key);
-                            // block on future, cannot call spawn because future does not live
-                            // long enough because query takes a reference
-                            rt.block_on(client.query(&query));
-                        }
-                        Ok(MetricRequest::Shutdown) => {
-                            info!("Received MetricRequest::Shutdown");
-                            break;
-                        }
-                        _ => unimplemented!(),
+        let join_handle = rt.spawn(async move {
+            let mut counters: HashMap<String, Counter> = HashMap::new();
+            error!("START Loop");
+            loop {
+                match recv.recv().await {
+                    Some(MetricRequest::Counter { key, value, time }) => {
+                        let counter = {
+                            if let Some(mut counter) = counters.get_mut(&key) {
+                                counter.value += 1;
+                                counter.time = time;
+                                counter.clone()
+                            } else {
+                                let counter = Counter {
+                                    time,
+                                    key: key.to_string(),
+                                    value,
+                                };
+                                counters.insert(key.to_string(), counter.clone());
+                                counter
+                            }
+                        };
+
+                        let query = counter.into_query(key);
+                        client.query(&query).await;
                     }
+                    Some(MetricRequest::Gauge { key, value, time }) => {
+                        let gauge = Gauge {
+                            time,
+                            key: key.to_string(),
+                            value,
+                        };
+                        let query = gauge.into_query(key);
+                        client.query(&query).await;
+                    }
+                    Some(MetricRequest::Histogram { key, value, time }) => {
+                        let histogram = Histogram {
+                            time,
+                            key: key.to_string(),
+                            value,
+                        };
+                        let query = histogram.into_query(key);
+                        client.query(&query).await;
+                    }
+                    Some(MetricRequest::Shutdown) => {
+                        info!("Received MetricRequest::Shutdown");
+                        break;
+                    }
+                    _ => unimplemented!(),
                 }
-            })
-            .map_err(|err| InternalError::from_source(Box::new(err)))?;
+            }
+        });
 
         Ok(Self {
+            sender,
             join_handle,
-            sender: sender,
+            rt,
         })
     }
 
@@ -140,45 +147,45 @@ impl InfluxRecorder {
     }
 }
 
-impl ShutdownHandle for InfluxRecorder {
-    fn signal_shutdown(&mut self) {
-        if let Err(_) = self.sender.send(MetricRequest::Shutdown) {
-            error!("Unable to send shutdown message to InfluxRecorder");
-        }
-    }
-
-    fn wait_for_shutdown(self) -> Result<(), InternalError> {
-        self.join_handle.join().map_err(|err| {
-            InternalError::with_message(format!("Unable to join InfluxRecorder thread: {:?}", err))
-        })
-    }
-}
+// impl ShutdownHandle for InfluxRecorder {
+//     fn signal_shutdown(&mut self) {
+//         if let Err(_) = self.sender.send(MetricRequest::Shutdown) {
+//             error!("Unable to send shutdown message to InfluxRecorder");
+//         }
+//     }
+//
+//     fn wait_for_shutdown(self) -> Result<(), InternalError> {
+//         self.join_handle.join().map_err(|err| {
+//             InternalError::with_message(format!("Unable to join InfluxRecorder thread: {:?}", err))
+//         })
+//     }
+// }
 
 impl Recorder for InfluxRecorder {
     fn increment_counter(&self, key: Key, value: u64) {
         let name = key.name().to_string();
-        if let Err(err) = self
-            .sender
-            .send(MetricRequest::Counter { key: name, value })
-        {
-            error!("Unable to submit metric, sender has dropped")
-        }
+        self.sender.send(MetricRequest::Counter {
+            key: name,
+            value,
+            time: Utc::now(),
+        });
     }
 
     fn update_gauge(&self, key: Key, value: i64) {
         let name = key.name().to_string();
-        if let Err(err) = self.sender.send(MetricRequest::Gauge { key: name, value }) {
-            error!("Unable to submit metric, sender has dropped")
-        }
+        self.sender.send(MetricRequest::Gauge {
+            key: name,
+            value,
+            time: Utc::now(),
+        });
     }
 
     fn record_histogram(&self, key: Key, value: u64) {
         let name = key.name().to_string();
-        if let Err(err) = self
-            .sender
-            .send(MetricRequest::Histogram { key: name, value })
-        {
-            error!("Unable to submit metric, sender has dropped")
-        }
+        self.sender.send(MetricRequest::Histogram {
+            key: name,
+            value,
+            time: Utc::now(),
+        });
     }
 }
