@@ -302,6 +302,8 @@ fn send_heartbeats<T: ConnectionMatrixLifeCycle, U: ConnectionMatrixSender>(
     authorizer: &dyn Authorizer,
     internal_sender: Sender<CmMessage>,
 ) {
+    counter!("splinter.test.heartbeats", 1);
+    gauge!("splinter.test.heartbeat.gauge", 5);
     let heartbeat_message = match create_heartbeat() {
         Ok(h) => h,
         Err(err) => {

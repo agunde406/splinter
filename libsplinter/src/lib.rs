@@ -16,6 +16,8 @@
 
 #[macro_use]
 extern crate log;
+#[macro_use]
+extern crate metrics_lib;
 #[cfg(any(feature = "admin-service", feature = "rest-api", feature = "registry"))]
 #[macro_use]
 extern crate serde_derive;
@@ -74,6 +76,8 @@ pub mod events;
 mod hex;
 pub mod keys;
 pub mod mesh;
+#[cfg(feature = "metrics")]
+pub mod metrics;
 pub mod migrations;
 pub mod network;
 #[cfg(feature = "oauth")]

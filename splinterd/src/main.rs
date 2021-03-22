@@ -28,6 +28,8 @@ mod transport;
 use flexi_logger::{style, DeferredNow, LogSpecBuilder, Logger};
 use log::Record;
 use rand::{thread_rng, Rng};
+#[cfg(feature = "metrics")]
+use splinter::metrics::influx::InfluxRecorder;
 
 use crate::config::{
     ClapPartialConfigBuilder, Config, ConfigBuilder, ConfigError, DefaultPartialConfigBuilder,
@@ -441,6 +443,9 @@ fn main() {
 }
 
 fn start_daemon(matches: ArgMatches) -> Result<(), UserError> {
+    // TODO move to where the client can be configured
+    #[cfg(feature = "metrics")]
+    let _metric_recoder = InfluxRecorder::init().expect("Unable to init metrics");
     // get provided config file or search default location
     let config_file = matches
         .value_of("config")

@@ -122,6 +122,7 @@ impl Mesh {
         connection: Box<dyn Connection>,
         unique_id: String,
     ) -> Result<usize, AddError> {
+        counter!("splinter.connections", 1);
         let mut state = self.state.write().map_err(|_| AddError::PoisonedLock)?;
         let outgoing = self.ctrl.add(connection)?;
         let mesh_id = outgoing.id();

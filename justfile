@@ -108,7 +108,6 @@ metrics:
     docker-compose \
         -f docker/metrics/docker-compose.yaml \
         up \
-        -d \
         --build;
 
 test:
