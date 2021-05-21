@@ -255,7 +255,7 @@ pub struct AuthProtocolResponse {
 /// response will be returned.
 #[derive(Debug)]
 pub struct AuthTrustRequest {
-    identity: String,
+    pub identity: String,
 }
 
 /// A successful trust authorization.
@@ -277,7 +277,7 @@ pub struct AuthChallengeNonceRequest;
 /// AuthChallengeSubmitRequest message
 #[derive(Debug)]
 pub struct AuthChallengeNonceResponse {
-    nonce: Vec<u8>,
+    pub nonce: Vec<u8>,
 }
 
 /// A challenge submit request
@@ -286,8 +286,8 @@ pub struct AuthChallengeNonceResponse {
 /// and the public key for the signature.
 #[derive(Debug)]
 pub struct AuthChallengeSubmitRequest {
-    public_key: Vec<u8>,
-    signature: Vec<u8>,
+    pub public_key: Vec<u8>,
+    pub signature: Vec<u8>,
 }
 
 /// A successful challenge authorization.
