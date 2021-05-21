@@ -272,7 +272,7 @@ impl Handler for TrustRequestHandler {
                 );
             }
             Ok(AuthorizationState::RemoteIdentified(identity))
-            | Ok(AuthorizationState::Authorized(identity)) => {
+            | Ok(AuthorizationState::AuthComplete(identity)) => {
                 debug!(
                     "Sending Authorized message to connection {} after receiving identity {}",
                     context.source_connection_id(),

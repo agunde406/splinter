@@ -133,6 +133,7 @@ experimental = [
     "rest-api-actix-web-3",
     "service-arg-validation",
     "service-network",
+    "trust-authorization",
     "ws-transport",
     "zmq-transport",
 ]
@@ -160,7 +161,7 @@ biome-credentials = ["bcrypt", "biome"]
 biome-key-management = ["biome"]
 biome-notifications = ["biome"]
 biome-profile = ["biome"]
-challenge-authorization = []
+challenge-authorization = ["trust-authorization"]
 circuit-template = ["admin-service", "glob"]
 client-reqwest = ["reqwest"]
 cylinder-jwt = ["cylinder/jwt", "rest-api"]
@@ -192,6 +193,7 @@ service-arg-validation = []
 service-network = []
 sqlite = ["diesel/sqlite", "diesel_migrations"]
 store-factory = []
+trust-authorization = []
 ws-transport = ["tungstenite"]
 zmq-transport = ["zmq"]
 
