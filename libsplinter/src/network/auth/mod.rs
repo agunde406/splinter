@@ -15,6 +15,7 @@
 mod connection_manager;
 mod handlers;
 mod pool;
+mod state_machine;
 
 use std::collections::HashMap;
 use std::fmt;
@@ -36,128 +37,19 @@ use crate::transport::{Connection, RecvError};
 
 use self::handlers::create_authorization_dispatcher;
 use self::pool::{ThreadPool, ThreadPoolBuilder};
+use self::state_machine::{AuthorizationManagerStateMachine, AuthorizationState};
 
 const AUTHORIZATION_THREAD_POOL_SIZE: usize = 8;
 
-/// The states of a connection during authorization.
-#[derive(PartialEq, Debug, Clone)]
-pub(crate) enum AuthorizationState {
-    Unknown,
-
-    // v0 authorization states
-    Connecting,
-    RemoteIdentified(String),
-    RemoteAccepted,
-    // Set for remote state if useing v0 authorization because the state of both connection is
-    // track together
-    NotApplicable,
-
-    // v1 authorization states
-    #[cfg(feature = "trust-authorization")]
-    ProtocolAgreeing,
-    #[cfg(feature = "trust-authorization")]
-    TrustIdentified(String),
-    #[cfg(feature = "trust-authorization")]
-    Authorized(String),
-
-    AuthComplete(String),
-    Unauthorized,
-}
-
-impl fmt::Display for AuthorizationState {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_str(match self {
-            AuthorizationState::Unknown => "Unknown",
-            // v0 authorization states
-            AuthorizationState::Connecting => "Connecting",
-            AuthorizationState::RemoteIdentified(_) => "Remote Identified",
-            AuthorizationState::RemoteAccepted => "Remote Accepted",
-            AuthorizationState::NotApplicable => "Not Applicable",
-
-            // v1 authorization states
-            #[cfg(feature = "trust-authorization")]
-            AuthorizationState::ProtocolAgreeing => "Protocol Agreeing",
-            #[cfg(feature = "trust-authorization")]
-            AuthorizationState::TrustIdentified(_) => "Trust Identified",
-            #[cfg(feature = "trust-authorization")]
-            AuthorizationState::Authorized(_) => "Authorized",
-
-            AuthorizationState::AuthComplete(_) => "Authorization Complete",
-            AuthorizationState::Unauthorized => "Unauthorized",
-        })
-    }
-}
-
 /// Used to track both the local nodes authorization state and the authorization state of the
 /// remote node. For v1, authorization is happening in parallel so the states must be tracked
-/// separately. For v0, remote_state is set to NotApplicable.
+/// separately.
 #[derive(Debug, Clone)]
 struct ManagedAuthorizationState {
     // Local node state
-    state: AuthorizationState,
-    // Remove node state
+    local_state: AuthorizationState,
+    // Remote node state
     remote_state: AuthorizationState,
-}
-
-type Identity = String;
-
-/// The state transitions that can be applied on a connection during authorization.
-#[derive(PartialEq, Debug)]
-pub(crate) enum AuthorizationAction {
-    // v0 actions
-    Connecting,
-    TrustIdentifyingV0(Identity),
-    Unauthorizing,
-    RemoteAuthorizing,
-
-    // v1 actions
-    #[cfg(feature = "trust-authorization")]
-    ProtocolAgreeing,
-    #[cfg(feature = "trust-authorization")]
-    TrustIdentifying(Identity),
-    #[cfg(feature = "trust-authorization")]
-    Authorizing,
-}
-
-impl fmt::Display for AuthorizationAction {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            // v0 actions
-            AuthorizationAction::Connecting => f.write_str("Connecting"),
-            AuthorizationAction::TrustIdentifyingV0(_) => f.write_str("TrustIdentifyingV0"),
-            AuthorizationAction::Unauthorizing => f.write_str("Unauthorizing"),
-            AuthorizationAction::RemoteAuthorizing => f.write_str("RemoteAuthorizing"),
-            // v1 actions
-            #[cfg(feature = "trust-authorization")]
-            AuthorizationAction::ProtocolAgreeing => f.write_str("ProtocolAgreeing"),
-            #[cfg(feature = "trust-authorization")]
-            AuthorizationAction::TrustIdentifying(_) => f.write_str("TrustIdentifying"),
-            #[cfg(feature = "trust-authorization")]
-            AuthorizationAction::Authorizing => f.write_str("Authorizing"),
-        }
-    }
-}
-
-/// The errors that may occur for a connection during authorization.
-#[derive(PartialEq, Debug)]
-pub(crate) enum AuthorizationActionError {
-    AlreadyConnecting,
-    InvalidMessageOrder(AuthorizationState, AuthorizationAction),
-    InternalError(String),
-}
-
-impl fmt::Display for AuthorizationActionError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            AuthorizationActionError::AlreadyConnecting => {
-                f.write_str("Already attempting to connect")
-            }
-            AuthorizationActionError::InvalidMessageOrder(start, action) => {
-                write!(f, "Attempting to transition from {} via {}", start, action)
-            }
-            AuthorizationActionError::InternalError(msg) => f.write_str(&msg),
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -428,222 +320,6 @@ impl AuthorizationMessageSender {
     }
 }
 
-#[derive(Clone, Default)]
-pub struct AuthorizationManagerStateMachine {
-    shared: Arc<Mutex<ManagedAuthorizations>>,
-}
-
-impl AuthorizationManagerStateMachine {
-    /// Transitions from one authorization state to another
-    ///
-    /// Errors
-    ///
-    /// The errors are error messages that should be returned on the appropriate message
-    pub(crate) fn next_state(
-        &self,
-        connection_id: &str,
-        action: AuthorizationAction,
-    ) -> Result<AuthorizationState, AuthorizationActionError> {
-        let mut shared = self.shared.lock().map_err(|_| {
-            AuthorizationActionError::InternalError("Authorization pool lock was poisoned".into())
-        })?;
-
-        let mut cur_state =
-            shared
-                .states
-                .entry(connection_id.to_string())
-                .or_insert(ManagedAuthorizationState {
-                    state: AuthorizationState::Unknown,
-                    remote_state: AuthorizationState::Unknown,
-                });
-
-        if action == AuthorizationAction::Unauthorizing {
-            cur_state.state = AuthorizationState::Unauthorized;
-            cur_state.remote_state = AuthorizationState::Unauthorized;
-            return Ok(AuthorizationState::Unauthorized);
-        }
-
-        match &cur_state.state {
-            AuthorizationState::Unknown => match action {
-                AuthorizationAction::Connecting => {
-                    cur_state.state = AuthorizationState::Connecting;
-                    cur_state.remote_state = AuthorizationState::NotApplicable;
-                    Ok(AuthorizationState::Connecting)
-                }
-                #[cfg(feature = "trust-authorization")]
-                AuthorizationAction::ProtocolAgreeing => {
-                    cur_state.state = AuthorizationState::ProtocolAgreeing;
-                    Ok(AuthorizationState::ProtocolAgreeing)
-                }
-                _ => Err(AuthorizationActionError::InvalidMessageOrder(
-                    AuthorizationState::Unknown,
-                    action,
-                )),
-            },
-            // v0 state transitions
-            AuthorizationState::Connecting => match action {
-                AuthorizationAction::Connecting => Err(AuthorizationActionError::AlreadyConnecting),
-                AuthorizationAction::TrustIdentifyingV0(identity) => {
-                    let new_state = AuthorizationState::RemoteIdentified(identity);
-                    cur_state.state = new_state.clone();
-                    // Verify pub key allowed
-                    Ok(new_state)
-                }
-                AuthorizationAction::RemoteAuthorizing => {
-                    cur_state.state = AuthorizationState::RemoteAccepted;
-                    Ok(AuthorizationState::RemoteAccepted)
-                }
-                _ => Err(AuthorizationActionError::InvalidMessageOrder(
-                    AuthorizationState::Connecting,
-                    action,
-                )),
-            },
-            AuthorizationState::RemoteIdentified(identity) => match action {
-                AuthorizationAction::RemoteAuthorizing => {
-                    let new_state = AuthorizationState::AuthComplete(identity.clone());
-                    cur_state.state = new_state.clone();
-                    Ok(new_state)
-                }
-                _ => Err(AuthorizationActionError::InvalidMessageOrder(
-                    AuthorizationState::RemoteIdentified(identity.clone()),
-                    action,
-                )),
-            },
-            AuthorizationState::RemoteAccepted => match action {
-                AuthorizationAction::TrustIdentifyingV0(identity) => {
-                    let new_state = AuthorizationState::AuthComplete(identity);
-                    cur_state.state = new_state.clone();
-                    Ok(new_state)
-                }
-                _ => Err(AuthorizationActionError::InvalidMessageOrder(
-                    AuthorizationState::RemoteAccepted,
-                    action,
-                )),
-            },
-            // v1 state transitions
-            #[cfg(feature = "trust-authorization")]
-            AuthorizationState::ProtocolAgreeing => match action {
-                AuthorizationAction::TrustIdentifying(identity) => {
-                    let new_state = AuthorizationState::TrustIdentified(identity);
-                    cur_state.state = new_state.clone();
-                    Ok(new_state)
-                }
-                _ => Err(AuthorizationActionError::InvalidMessageOrder(
-                    AuthorizationState::RemoteAccepted,
-                    action,
-                )),
-            },
-            #[cfg(feature = "trust-authorization")]
-            AuthorizationState::TrustIdentified(identity) => match action {
-                AuthorizationAction::Authorizing => {
-                    let new_state = {
-                        match &cur_state.remote_state {
-                            AuthorizationState::Authorized(local_id) => {
-                                cur_state.remote_state =
-                                    AuthorizationState::AuthComplete(local_id.to_string());
-                                AuthorizationState::AuthComplete(identity.to_string())
-                            }
-                            _ => AuthorizationState::Authorized(identity.to_string()),
-                        }
-                    };
-
-                    cur_state.state = new_state.clone();
-                    Ok(new_state)
-                }
-                _ => Err(AuthorizationActionError::InvalidMessageOrder(
-                    AuthorizationState::RemoteAccepted,
-                    action,
-                )),
-            },
-            _ => Err(AuthorizationActionError::InvalidMessageOrder(
-                cur_state.state.clone(),
-                action,
-            )),
-        }
-    }
-
-    /// Transitions from one authorization state to another. This is specific to the remote node
-    ///
-    /// Errors
-    ///
-    /// The errors are error messages that should be returned on the appropriate message
-    #[cfg(feature = "trust-authorization")]
-    pub(crate) fn next_remote_state(
-        &self,
-        connection_id: &str,
-        action: AuthorizationAction,
-    ) -> Result<AuthorizationState, AuthorizationActionError> {
-        let mut shared = self.shared.lock().map_err(|_| {
-            AuthorizationActionError::InternalError("Authorization pool lock was poisoned".into())
-        })?;
-
-        let mut cur_state =
-            shared
-                .states
-                .entry(connection_id.to_string())
-                .or_insert(ManagedAuthorizationState {
-                    state: AuthorizationState::Unknown,
-                    remote_state: AuthorizationState::Unknown,
-                });
-
-        if action == AuthorizationAction::Unauthorizing {
-            cur_state.state = AuthorizationState::Unauthorized;
-            cur_state.remote_state = AuthorizationState::Unauthorized;
-            return Ok(AuthorizationState::Unauthorized);
-        }
-
-        match &cur_state.remote_state {
-            AuthorizationState::Unknown => match action {
-                AuthorizationAction::ProtocolAgreeing => {
-                    cur_state.remote_state = AuthorizationState::ProtocolAgreeing;
-                    Ok(AuthorizationState::ProtocolAgreeing)
-                }
-                _ => Err(AuthorizationActionError::InvalidMessageOrder(
-                    AuthorizationState::Unknown,
-                    action,
-                )),
-            },
-            // v1 state transitions
-            AuthorizationState::ProtocolAgreeing => match action {
-                AuthorizationAction::TrustIdentifying(identity) => {
-                    let new_state = AuthorizationState::TrustIdentified(identity);
-                    cur_state.remote_state = new_state.clone();
-                    Ok(new_state)
-                }
-                _ => Err(AuthorizationActionError::InvalidMessageOrder(
-                    AuthorizationState::RemoteAccepted,
-                    action,
-                )),
-            },
-            AuthorizationState::TrustIdentified(identity) => match action {
-                AuthorizationAction::Authorizing => {
-                    let new_state = {
-                        match &cur_state.state {
-                            AuthorizationState::Authorized(local_id) => {
-                                cur_state.state =
-                                    AuthorizationState::AuthComplete(local_id.to_string());
-                                AuthorizationState::AuthComplete(identity.to_string())
-                            }
-                            _ => AuthorizationState::Authorized(identity.to_string()),
-                        }
-                    };
-
-                    cur_state.remote_state = new_state.clone();
-                    Ok(new_state)
-                }
-                _ => Err(AuthorizationActionError::InvalidMessageOrder(
-                    AuthorizationState::RemoteAccepted,
-                    action,
-                )),
-            },
-            _ => Err(AuthorizationActionError::InvalidMessageOrder(
-                cur_state.remote_state.clone(),
-                action,
-            )),
-        }
-    }
-}
-
 #[derive(Default)]
 struct ManagedAuthorizations {
     states: HashMap<String, ManagedAuthorizationState>,
@@ -659,9 +335,9 @@ impl ManagedAuthorizations {
     fn take_connection_identity(&mut self, connection_id: &str) -> Option<String> {
         self.states.remove(connection_id).and_then(|managed_state| {
             match managed_state.remote_state {
-                AuthorizationState::AuthComplete(identity) => Some(identity),
-                AuthorizationState::NotApplicable => match managed_state.state {
-                    AuthorizationState::AuthComplete(identity) => Some(identity),
+                AuthorizationState::AuthComplete(Some(identity)) => Some(identity),
+                AuthorizationState::AuthComplete(None) => match managed_state.local_state {
+                    AuthorizationState::AuthComplete(Some(identity)) => Some(identity),
                     _ => None,
                 },
                 _ => None,
@@ -672,13 +348,10 @@ impl ManagedAuthorizations {
     fn is_complete(&self, connection_id: &str) -> Option<bool> {
         self.states.get(connection_id).map(|managed_state| {
             matches!(
-                (&managed_state.state, &managed_state.remote_state),
+                (&managed_state.local_state, &managed_state.remote_state),
                 (
                     AuthorizationState::AuthComplete(_),
                     AuthorizationState::AuthComplete(_)
-                ) | (
-                    AuthorizationState::AuthComplete(_),
-                    AuthorizationState::NotApplicable
                 ) | (
                     AuthorizationState::Unauthorized,
                     AuthorizationState::Unauthorized
