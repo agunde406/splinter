@@ -20,6 +20,7 @@ use std::time::Instant;
 use crate::collections::BiHashMap;
 
 use super::error::PeerUpdateError;
+use super::PeerAuthorizationToken;
 
 /// Enum for the current status of a peer
 #[derive(Clone, PartialEq, Debug)]
@@ -35,8 +36,8 @@ pub enum PeerStatus {
 /// The representation of a peer in the `PeerMap`
 #[derive(Clone, PartialEq, Debug)]
 pub struct PeerMetadata {
-    /// The unique ID for the peer
-    pub id: String,
+    /// The unique PeerAuthorizationToken ID for the peer
+    pub id: PeerAuthorizationToken,
     /// The connection ID for the peer's connection
     pub connection_id: String,
     /// A list of endpoints the peer is reachable at
@@ -55,9 +56,9 @@ pub struct PeerMetadata {
 ///
 /// Peer metadata includes the peer ID, the list of endpoints, and the current active endpoint.
 pub struct PeerMap {
-    peers: HashMap<String, PeerMetadata>,
+    peers: HashMap<PeerAuthorizationToken, PeerMetadata>,
     // Endpoint to peer id
-    endpoints: HashMap<String, String>,
+    endpoints: HashMap<String, PeerAuthorizationToken>,
     initial_retry_frequency: u64,
 }
 
@@ -79,18 +80,18 @@ impl PeerMap {
     }
 
     /// Returns the current list of peer IDs
-    pub fn peer_ids(&self) -> Vec<String> {
+    pub fn peer_ids(&self) -> Vec<PeerAuthorizationToken> {
         self.peers
             .iter()
-            .map(|(_, metadata)| metadata.id.to_string())
+            .map(|(_, metadata)| metadata.id.clone())
             .collect()
     }
 
     /// Returns the current map of peer IDs to connection IDs
-    pub fn connection_ids(&self) -> BiHashMap<String, String> {
+    pub fn connection_ids(&self) -> BiHashMap<PeerAuthorizationToken, String> {
         let mut peer_to_connection_id = BiHashMap::new();
         for (peer, metadata) in self.peers.iter() {
-            peer_to_connection_id.insert(peer.to_string(), metadata.connection_id.to_string());
+            peer_to_connection_id.insert(peer.clone(), metadata.connection_id.to_string());
         }
 
         peer_to_connection_id
@@ -107,7 +108,7 @@ impl PeerMap {
     /// * `status` - The peer's current status
     pub fn insert(
         &mut self,
-        peer_id: String,
+        peer_id: PeerAuthorizationToken,
         connection_id: String,
         endpoints: Vec<String>,
         active_endpoint: String,
@@ -139,8 +140,8 @@ impl PeerMap {
     /// * `peer_id` - The unique ID for the peer
     ///
     /// Returns the metadata for the peer if it exists.
-    pub fn remove(&mut self, peer_id: &str) -> Option<PeerMetadata> {
-        if let Some(peer_metadata) = self.peers.remove(&peer_id.to_string()) {
+    pub fn remove(&mut self, peer_id: &PeerAuthorizationToken) -> Option<PeerMetadata> {
+        if let Some(peer_metadata) = self.peers.remove(&peer_id) {
             for endpoint in peer_metadata.endpoints.iter() {
                 self.endpoints.remove(endpoint);
             }
@@ -166,7 +167,7 @@ impl PeerMap {
             }
 
             self.peers
-                .insert(peer_metadata.id.to_string(), peer_metadata);
+                .insert(peer_metadata.id.clone(), peer_metadata);
 
             Ok(())
         } else {
@@ -187,7 +188,7 @@ impl PeerMap {
     }
 
     /// Returns the metadata for a peer from the provided peer ID
-    pub fn get_by_peer_id(&self, peer_id: &str) -> Option<&PeerMetadata> {
+    pub fn get_by_peer_id(&self, peer_id: &PeerAuthorizationToken) -> Option<&PeerMetadata> {
         self.peers.get(peer_id)
     }
 
@@ -199,7 +200,7 @@ impl PeerMap {
     }
 
     /// Returns the list of peers whose peer status is pending
-    pub fn get_pending(&self) -> impl Iterator<Item = (&String, &PeerMetadata)> {
+    pub fn get_pending(&self) -> impl Iterator<Item = (&PeerAuthorizationToken, &PeerMetadata)> {
         self.peers
             .iter()
             .filter(|(_id, peer_meta)| peer_meta.status == PeerStatus::Pending)
@@ -227,7 +228,9 @@ pub mod tests {
         assert_eq!(peers, Vec::<String>::new());
 
         peer_map.insert(
-            "test_peer".to_string(),
+            PeerAuthorizationToken::Trust {
+                peer_id: "test_peer".to_string(),
+            },
             "connection_id_1".to_string(),
             vec!["test_endpoint1".to_string(), "test_endpoint2".to_string()],
             "test_endpoint2".to_string(),
@@ -235,7 +238,9 @@ pub mod tests {
         );
 
         peer_map.insert(
-            "next_peer".to_string(),
+            PeerAuthorizationToken::Trust {
+                peer_id: "next_peer".to_string(),
+            },
             "connection_id_2".to_string(),
             vec!["endpoint1".to_string(), "endpoint2".to_string()],
             "next_endpoint1".to_string(),
@@ -246,7 +251,14 @@ pub mod tests {
         peers.sort();
         assert_eq!(
             peers,
-            vec!["next_peer".to_string(), "test_peer".to_string()]
+            vec![
+                PeerAuthorizationToken::Trust {
+                    peer_id: "next_peer".to_string()
+                },
+                PeerAuthorizationToken::Trust {
+                    peer_id: "test_peer".to_string()
+                }
+            ]
         );
     }
 
@@ -261,7 +273,9 @@ pub mod tests {
         assert_eq!(peers, Vec::<String>::new());
 
         peer_map.insert(
-            "test_peer".to_string(),
+            PeerAuthorizationToken::Trust {
+                peer_id: "test_peer".to_string(),
+            },
             "connection_id_1".to_string(),
             vec!["test_endpoint1".to_string(), "test_endpoint2".to_string()],
             "test_endpoint2".to_string(),
@@ -269,7 +283,9 @@ pub mod tests {
         );
 
         peer_map.insert(
-            "next_peer".to_string(),
+            PeerAuthorizationToken::Trust {
+                peer_id: "next_peer".to_string(),
+            },
             "connection_id_2".to_string(),
             vec!["endpoint1".to_string(), "endpoint2".to_string()],
             "next_endpoint1".to_string(),
@@ -278,11 +294,15 @@ pub mod tests {
 
         let peers = peer_map.connection_ids();
         assert_eq!(
-            peers.get_by_key("test_peer"),
+            peers.get_by_key(PeerAuthorizationToken::Trust {
+                peer_id: "next_peer".to_string()
+            }),
             Some(&"connection_id_1".to_string())
         );
         assert_eq!(
-            peers.get_by_key("next_peer"),
+            peers.get_by_key(PeerAuthorizationToken::Trust {
+                peer_id: "next_peer".to_string()
+            }),
             Some(&"connection_id_2".to_string())
         );
     }
@@ -301,7 +321,9 @@ pub mod tests {
         assert_eq!(peer_metadata, None);
 
         peer_map.insert(
-            "test_peer".to_string(),
+            PeerAuthorizationToken::Trust {
+                peer_id: "test_peer".to_string(),
+            },
             "connection_id".to_string(),
             vec!["test_endpoint1".to_string(), "test_endpoint2".to_string()],
             "test_endpoint2".to_string(),
@@ -312,7 +334,12 @@ pub mod tests {
             .get_peer_from_endpoint("test_endpoint1")
             .expect("missing expected peer_metadata");
 
-        assert_eq!(peer_metadata.id, "test_peer".to_string());
+        assert_eq!(
+            peer_metadata.id,
+            PeerAuthorizationToken::Trust {
+                peer_id: "test_peer".to_string()
+            }
+        );
         assert_eq!(
             peer_metadata.endpoints,
             vec!["test_endpoint1".to_string(), "test_endpoint2".to_string()]
@@ -335,7 +362,9 @@ pub mod tests {
         let mut peer_map = PeerMap::new(10);
 
         peer_map.insert(
-            "test_peer".to_string(),
+            PeerAuthorizationToken::Trust {
+                peer_id: "test_peer".to_string(),
+            },
             "connection_id".to_string(),
             vec!["test_endpoint1".to_string(), "test_endpoint2".to_string()],
             "test_endpoint2".to_string(),
@@ -345,9 +374,16 @@ pub mod tests {
 
         let peer_metadata = peer_map
             .peers
-            .get("test_peer")
+            .get(&PeerAuthorizationToken::Trust {
+                peer_id: "test_peer".to_string(),
+            })
             .expect("Missing peer_metadata");
-        assert_eq!(peer_metadata.id, "test_peer".to_string());
+        assert_eq!(
+            peer_metadata.id,
+            PeerAuthorizationToken::Trust {
+                peer_id: "test_peer".to_string()
+            }
+        );
         assert_eq!(
             peer_metadata.endpoints,
             vec!["test_endpoint1".to_string(), "test_endpoint2".to_string()]
@@ -369,19 +405,36 @@ pub mod tests {
         assert_eq!(peer_metdata, None);
 
         peer_map.insert(
-            "test_peer".to_string(),
+            PeerAuthorizationToken::Trust {
+                peer_id: "test_peer".to_string(),
+            },
             "connection_id".to_string(),
             vec!["test_endpoint1".to_string(), "test_endpoint2".to_string()],
             "test_endpoint2".to_string(),
             PeerStatus::Pending,
         );
-        assert!(peer_map.peers.contains_key("test_peer"));
+        assert!(peer_map.peers.contains_key(&PeerAuthorizationToken::Trust {
+            peer_id: "test_peer".to_string()
+        }));
 
-        let peer_metadata = peer_map.remove("test_peer").expect("Missing peer_metadata");
-        assert!(!peer_map.peers.contains_key("test_peer"));
+        let peer_metadata = peer_map
+            .remove(PeerAuthorizationToken::Trust {
+                peer_id: "test_peer".to_string(),
+            })
+            .expect("Missing peer_metadata");
+        assert!(
+            !peer_map.peers.contains_key(&PeerAuthorizationToken::Trust {
+                peer_id: "test_peer".to_string()
+            })
+        );
 
         assert_eq!(peer_metadata.active_endpoint, "test_endpoint2".to_string());
-        assert_eq!(peer_metadata.id, "test_peer".to_string());
+        assert_eq!(
+            peer_metadata.id,
+            &PeerAuthorizationToken::Trust {
+                peer_id: "test_peer".to_string()
+            },
+        );
     }
 
     // Test that a peer can be updated
@@ -394,7 +447,9 @@ pub mod tests {
     fn test_get_update_active_endpoint() {
         let mut peer_map = PeerMap::new(10);
         let no_peer_metadata = PeerMetadata {
-            id: "test_peer".to_string(),
+            id: PeerAuthorizationToken::Trust {
+                peer_id: "test_peer".to_string(),
+            },
             connection_id: "connection_id".to_string(),
             endpoints: vec!["test_endpoint1".to_string(), "test_endpoint2".to_string()],
             active_endpoint: "test_endpoint1".to_string(),
@@ -408,7 +463,9 @@ pub mod tests {
         }
 
         peer_map.insert(
-            "test_peer".to_string(),
+            PeerAuthorizationToken::Trust {
+                peer_id: "test_peer".to_string(),
+            },
             "connection_id".to_string(),
             vec!["test_endpoint1".to_string(), "test_endpoint2".to_string()],
             "test_endpoint2".to_string(),
@@ -431,10 +488,17 @@ pub mod tests {
 
         let peer_metadata = peer_map
             .peers
-            .get("test_peer")
+            .get(&PeerAuthorizationToken::Trust {
+                peer_id: "test_peer".to_string(),
+            })
             .expect("Missing peer_metadata");
 
-        assert_eq!(peer_metadata.id, "test_peer".to_string());
+        assert_eq!(
+            peer_metadata.id,
+            PeerAuthorizationToken::Trust {
+                peer_id: "test_peer".to_string(),
+            }
+        );
         assert_eq!(
             peer_metadata.endpoints,
             vec![

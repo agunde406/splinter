@@ -22,16 +22,17 @@ use cylinder::{PublicKey, Signature, Verifier as SignatureVerifier};
 use protobuf::{Message, RepeatedField};
 
 use crate::admin::store::{
-    AdminServiceStore, Circuit as StoreCircuit, CircuitBuilder as StoreCircuitBuilder, CircuitNode,
-    CircuitPredicate, CircuitProposal as StoreProposal, CircuitStatus as StoreCircuitStatus,
-    ProposalType, ProposedNode, Service as StoreService, Vote, VoteRecordBuilder,
+    AdminServiceStore, AuthorizationType, Circuit as StoreCircuit,
+    CircuitBuilder as StoreCircuitBuilder, CircuitNode, CircuitPredicate,
+    CircuitProposal as StoreProposal, CircuitStatus as StoreCircuitStatus, ProposalType,
+    ProposedNode, Service as StoreService, Vote, VoteRecordBuilder,
 };
 use crate::circuit::routing::{self, RoutingTableWriter};
 use crate::consensus::{Proposal, ProposalId, ProposalUpdate};
 use crate::hex::to_hex;
 use crate::keys::KeyPermissionManager;
 use crate::orchestrator::{ServiceDefinition, ServiceOrchestrator};
-use crate::peer::{PeerManagerConnector, PeerRef};
+use crate::peer::{PeerAuthorizationToken, PeerManagerConnector, PeerRef};
 use crate::protocol::{
     ADMIN_SERVICE_PROTOCOL_MIN, ADMIN_SERVICE_PROTOCOL_VERSION, CIRCUIT_PROTOCOL_VERSION,
 };
@@ -111,7 +112,7 @@ pub struct AdminServiceShared {
     peer_connector: PeerManagerConnector,
     // PeerRef Map, peer_id to PeerRef, these PeerRef should be dropped when the peer is no longer
     // needed
-    peer_refs: HashMap<String, Vec<PeerRef>>,
+    peer_refs: HashMap<PeerAuthorizationToken, Vec<PeerRef>>,
     // network sender is used to communicate with other services on the splinter network
     network_sender: Option<Box<dyn ServiceNetworkSender>>,
     // the CircuitManagementPayloads that are waiting for members to be peered
@@ -246,7 +247,7 @@ impl AdminServiceShared {
             peer_ref_vec.push(peer_ref);
         } else {
             self.peer_refs
-                .insert(peer_ref.peer_id().to_string(), vec![peer_ref]);
+                .insert(peer_ref.peer_id().clone(), vec![peer_ref]);
         }
     }
 
@@ -256,15 +257,16 @@ impl AdminServiceShared {
         }
     }
 
-    pub fn remove_peer_ref(&mut self, peer_id: &str) {
+    pub fn remove_peer_ref(&mut self, peer_id: &PeerAuthorizationToken) {
         if let Some(mut peer_ref_vec) = self.peer_refs.remove(peer_id) {
             peer_ref_vec.pop();
             if !peer_ref_vec.is_empty() {
-                self.peer_refs.insert(peer_id.to_string(), peer_ref_vec);
+                self.peer_refs.insert(peer_id.clone(), peer_ref_vec);
             } else {
                 // If we have no other peer refs for this peer, the connection will be closed.
                 // On reconnection, the peer must go through protocol agreement again
-                self.service_protocols.remove(&admin_service_id(&peer_id));
+                self.service_protocols
+                    .remove(&admin_service_id(&peer_id.id_as_string()));
             }
         }
     }
@@ -541,7 +543,25 @@ impl AdminServiceShared {
                         self.update_metrics()?;
                         if let Some(proposal) = proposal {
                             for member in proposal.circuit().members().iter() {
-                                self.remove_peer_ref(member.node_id());
+                                match proposal.circuit().authorization_type() {
+                                    AuthorizationType::Trust => {
+                                        self.remove_peer_ref(&PeerAuthorizationToken::Trust {
+                                            peer_id: member.node_id().into(),
+                                        })
+                                    }
+                                    #[cfg(feature = "challenge-authorization")]
+                                    AuthorizationType::Challenge => {
+                                        self.remove_peer_ref(&PeerAuthorizationToken::Challenge {
+                                            public_key: member.public_key().ok_or_else(|| {
+                                                AdminSharedError::SplinterStateError(format!(
+                                                    "No public key set when circuit requries \
+                                                    challenge authorizaiton: {}",
+                                                    circuit_id
+                                                ))
+                                            })?,
+                                        })
+                                    }
+                                }
                             }
                         }
                         let circuit_proposal_proto =
@@ -615,7 +635,17 @@ impl AdminServiceShared {
                 .map_err(|err| {
                     // remove peer_ref because we will not accept this proposal
                     for member in proposed_circuit.get_members() {
-                        self.remove_peer_ref(member.get_node_id())
+                        match proposed_circuit.get_authorization_type() {
+                            Circuit_AuthorizationType::TRUST_AUTHORIZATION => {
+                                self.remove_peer_ref(&PeerAuthorizationToken::Trust {
+                                    peer_id: member.get_node_id().into(),
+                                })
+                            }
+                            Circuit_AuthorizationType::CHALLENGE_AUTHORIZATION => self
+                                .remove_peer_ref(&PeerAuthorizationToken::Challenge {
+                                    public_key: member.get_public_key().into(),
+                                }),
+                        }
                     }
                     err
                 })?;
@@ -674,7 +704,23 @@ impl AdminServiceShared {
                     if circuit_proposal.proposal_type() == &ProposalType::Create {
                         // remove peer_ref because we will not accept this proposal
                         for member in circuit_proposal.circuit().members() {
-                            self.remove_peer_ref(member.node_id())
+                            match circuit_proposal.circuit().authorization_type() {
+                                AuthorizationType::Trust => {
+                                    self.remove_peer_ref(&PeerAuthorizationToken::Trust {
+                                        peer_id: member.node_id().into(),
+                                    })
+                                }
+                                #[cfg(feature = "challenge-authorization")]
+                                AuthorizationType::Challenge => {
+                                    self.remove_peer_ref(&PeerAuthorizationToken::Challenge {
+                                        // This will always return a public key if it has made it
+                                        // to this point
+                                        public_key: member
+                                            .public_key()
+                                            .expect("No public key set for member"),
+                                    })
+                                }
+                            }
                         }
                     }
                     err
@@ -1026,7 +1072,25 @@ impl AdminServiceShared {
             })?;
         // Removing the circuit's peer refs
         for member in stored_circuit.members() {
-            self.remove_peer_ref(member.node_id());
+            match stored_circuit.authorization_type() {
+                AuthorizationType::Trust => self.remove_peer_ref(&PeerAuthorizationToken::Trust {
+                    peer_id: member.node_id().into(),
+                }),
+                #[cfg(feature = "challenge-authorization")]
+                AuthorizationType::Challenge => {
+                    self.remove_peer_ref(&PeerAuthorizationToken::Challenge {
+                        public_key: member.public_key().ok_or_else(|| {
+                            ServiceError::UnableToHandleMessage(Box::new(
+                                AdminSharedError::SplinterStateError(format!(
+                                    "No public key set when circuit requries \
+                                challenge authorizaiton: {}",
+                                    circuit_id
+                                )),
+                            ))
+                        })?,
+                    })
+                }
+            }
         }
 
         Ok(())
@@ -1631,7 +1695,7 @@ impl AdminServiceShared {
         self.event_subscribers.clear();
     }
 
-    pub fn on_peer_disconnected(&mut self, peer_id: String) {
+    pub fn on_peer_disconnected(&mut self, peer_id: PeerAuthorizationToken) {
         self.service_protocols.remove(&admin_service_id(&peer_id));
         let mut pending_protocol_payloads =
             std::mem::replace(&mut self.pending_protocol_payloads, vec![]);
@@ -1665,7 +1729,10 @@ impl AdminServiceShared {
         self.unpeered_payloads = unpeered_payloads;
     }
 
-    pub fn on_peer_connected(&mut self, peer_id: &str) -> Result<(), AdminSharedError> {
+    pub fn on_peer_connected(
+        &mut self,
+        peer_id: &PeerAuthorizationToken,
+    ) -> Result<(), AdminSharedError> {
         let mut unpeered_payloads = std::mem::replace(&mut self.unpeered_payloads, vec![]);
         for unpeered_payload in unpeered_payloads.iter_mut() {
             unpeered_payload
@@ -1684,7 +1751,7 @@ impl AdminServiceShared {
         }
 
         // Ignore own admin service
-        if peer_id == admin_service_id(self.node_id()) {
+        if peer_id.has_peer_id(admin_service_id(self.node_id())) {
             return Ok(());
         }
 

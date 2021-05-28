@@ -37,7 +37,7 @@ use crate::consensus::Proposal;
 use crate::hex::to_hex;
 use crate::keys::KeyPermissionManager;
 use crate::orchestrator::{ServiceDefinition, ServiceOrchestrator};
-use crate::peer::{PeerManagerConnector, PeerManagerNotification};
+use crate::peer::{PeerAuthorizationToken, PeerManagerConnector, PeerManagerNotification};
 use crate::protocol::{ADMIN_SERVICE_PROTOCOL_MIN, ADMIN_SERVICE_PROTOCOL_VERSION};
 use crate::protos::admin::{
     AdminMessage, AdminMessage_Type, CircuitManagementPayload, ServiceProtocolVersionResponse,
@@ -275,10 +275,12 @@ impl AdminService {
             for member in circuit.members().iter() {
                 if member.node_id() != self.node_id {
                     if let Some(node) = nodes.get(member.node_id()) {
-                        let peer_ref = self
-                            .peer_connector
-                            .add_peer_ref(member.node_id().to_string(), node.endpoints().to_vec());
-
+                        let peer_ref = self.peer_connector.add_peer_ref(
+                            PeerAuthorizationToken::Trust {
+                                peer_id: member.node_id().to_string(),
+                            },
+                            node.endpoints().to_vec(),
+                        );
                         if let Ok(peer_ref) = peer_ref {
                             peer_refs.push(peer_ref);
                         } else {
@@ -418,9 +420,12 @@ impl AdminService {
             // connect to all peers in the circuit proposal
             for member in proposal.circuit().members().iter() {
                 if member.node_id() != self.node_id {
-                    let peer_ref = self
-                        .peer_connector
-                        .add_peer_ref(member.node_id().to_string(), member.endpoints().to_vec());
+                    let peer_ref = self.peer_connector.add_peer_ref(
+                        PeerAuthorizationToken::Trust {
+                            peer_id: member.node_id().to_string(),
+                        },
+                        member.endpoints().to_vec(),
+                    );
 
                     if let Ok(peer_ref) = peer_ref {
                         peer_refs.push(peer_ref);

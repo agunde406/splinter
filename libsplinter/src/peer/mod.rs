@@ -32,6 +32,7 @@ mod peer_ref;
 
 use std::cmp::min;
 use std::collections::HashMap;
+use std::fmt;
 use std::io::ErrorKind;
 use std::sync::mpsc::{channel, Sender};
 use std::thread;
@@ -41,6 +42,7 @@ use uuid::Uuid;
 
 use crate::collections::{BiHashMap, RefMap};
 use crate::error::InternalError;
+use crate::hex::to_hex;
 use crate::network::connection_manager::ConnectionManagerNotification;
 use crate::network::connection_manager::{ConnectionManagerError, Connector};
 use crate::threading::lifecycle::ShutdownHandle;
@@ -57,6 +59,72 @@ pub use self::notification::{PeerManagerNotification, PeerNotificationIter, Subs
 use self::notification::{Subscriber, SubscriberMap};
 use self::peer_map::{PeerMap, PeerStatus};
 pub use self::peer_ref::{EndpointPeerRef, PeerRef};
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum PeerAuthorizationToken {
+    Trust {
+        peer_id: String,
+    },
+    #[cfg(feature = "challenge-authorization")]
+    Challenge {
+        public_key: Vec<u8>,
+    },
+}
+
+impl PeerAuthorizationToken {
+    pub fn has_peer_id(&self, peer_id: &str) -> bool {
+        match self {
+            PeerAuthorizationToken::Trust { peer_id: id } => peer_id == id,
+            #[cfg(feature = "challenge-authorization")]
+            PeerAuthorizationToken::Challenge { .. } => false,
+        }
+    }
+
+    #[cfg(feature = "challenge-authorization")]
+    pub fn has_public_key(&self, public_keys: &[Vec<u8>]) -> bool {
+        match self {
+            PeerAuthorizationToken::Trust { .. } => false,
+            PeerAuthorizationToken::Challenge { public_key } => public_keys.contains(&public_key),
+        }
+    }
+
+    pub fn peer_id(&self) -> Option<&str> {
+        match self {
+            PeerAuthorizationToken::Trust { peer_id } => Some(&peer_id),
+            #[cfg(feature = "challenge-authorization")]
+            PeerAuthorizationToken::Challenge { .. } => None,
+        }
+    }
+
+    #[cfg(feature = "challenge-authorization")]
+    pub fn public_key(&self) -> Option<&[u8]> {
+        match self {
+            PeerAuthorizationToken::Trust { .. } => None,
+            PeerAuthorizationToken::Challenge { public_key } => Some(public_key),
+        }
+    }
+
+    pub fn id_as_string(&self) -> String {
+        match self {
+            PeerAuthorizationToken::Trust { peer_id } => peer_id.to_string(),
+            #[cfg(feature = "challenge-authorization")]
+            PeerAuthorizationToken::Challenge { public_key } => to_hex(public_key),
+        }
+    }
+}
+
+impl fmt::Display for PeerAuthorizationToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PeerAuthorizationToken::Trust { peer_id } => {
+                write!(f, "Trust ( peer_id: {} )", peer_id)
+            }
+            PeerAuthorizationToken::Challenge { public_key } => {
+                write!(f, "Challenge ( public_key: {} )", to_hex(public_key))
+            }
+        }
+    }
+}
 
 /// Internal messages to drive management
 pub(crate) enum PeerManagerMessage {
@@ -82,7 +150,7 @@ impl From<ConnectionManagerNotification> for PeerManagerMessage {
 /// The requests that will be handled by the `PeerManager`
 pub(crate) enum PeerManagerRequest {
     AddPeer {
-        peer_id: String,
+        peer_id: PeerAuthorizationToken,
         endpoints: Vec<String>,
         sender: Sender<Result<PeerRef, PeerRefAddError>>,
     },
@@ -91,7 +159,7 @@ pub(crate) enum PeerManagerRequest {
         sender: Sender<Result<EndpointPeerRef, PeerUnknownAddError>>,
     },
     RemovePeer {
-        peer_id: String,
+        peer_id: PeerAuthorizationToken,
         sender: Sender<Result<(), PeerRefRemoveError>>,
     },
     RemovePeerByEndpoint {
@@ -99,10 +167,10 @@ pub(crate) enum PeerManagerRequest {
         sender: Sender<Result<(), PeerRefRemoveError>>,
     },
     ListPeers {
-        sender: Sender<Result<Vec<String>, PeerListError>>,
+        sender: Sender<Result<Vec<PeerAuthorizationToken>, PeerListError>>,
     },
     ListUnreferencedPeers {
-        sender: Sender<Result<Vec<String>, PeerListError>>,
+        sender: Sender<Result<Vec<PeerAuthorizationToken>, PeerListError>>,
     },
     ConnectionIds {
         sender: Sender<Result<BiHashMap<String, String>, PeerConnectionIdError>>,
@@ -113,7 +181,7 @@ pub(crate) enum PeerManagerRequest {
     },
     GetPeerId {
         connection_id: String,
-        sender: Sender<Result<Option<String>, PeerLookupError>>,
+        sender: Sender<Result<Option<PeerAuthorizationToken>, PeerLookupError>>,
     },
     Subscribe {
         sender: Sender<Result<SubscriberId, PeerManagerError>>,
@@ -689,7 +757,7 @@ fn add_unidentified(
     info!("Attempting to peer with peer by endpoint {}", endpoint);
     if let Some(peer_metadata) = peers.get_peer_from_endpoint(&endpoint) {
         // if there is peer in the peer_map, there is reference in the ref map
-        ref_map.add_ref(peer_metadata.id.to_string());
+        ref_map.add_ref(peer_metadata.id.clone()());
         EndpointPeerRef::new(endpoint, peer_remover.clone())
     } else {
         let connection_id = format!("{}", Uuid::new_v4());

@@ -41,6 +41,7 @@ use crate::transport::matrix::{
 
 use super::connector::{PeerLookup, PeerLookupProvider};
 use super::error::PeerInterconnectError;
+use super::PeerAuthorizationToken;
 
 const DEFAULT_PENDING_QUEUE_SIZE: usize = 100;
 const DEFAULT_TIME_BETWEEN_ATTEMPTS: u64 = 10; // 10 seconds
@@ -365,7 +366,7 @@ fn run_recv_loop<R>(
 where
     R: ConnectionMatrixReceiver + 'static,
 {
-    let mut connection_id_to_peer_id: HashMap<String, String> = HashMap::new();
+    let mut connection_id_to_peer_id: HashMap<String, PeerAuthorizationToken> = HashMap::new();
     loop {
         // receive messages from peers
         let envelope = match message_receiver.recv() {
@@ -530,7 +531,7 @@ fn run_pending_recv_loop(
     receiver: Receiver<RetryIncoming>,
     dispatch_msg_sender: DispatchMessageSender<NetworkMessageType>,
 ) -> Result<(), String> {
-    let mut connection_id_to_peer_id: HashMap<String, String> = HashMap::new();
+    let mut connection_id_to_peer_id: HashMap<String, PeerAuthorizationToken> = HashMap::new();
     let mut pending_queue = VecDeque::new();
     loop {
         match receiver.recv() {
@@ -592,7 +593,7 @@ fn run_pending_recv_loop(
                 match dispatch_msg_sender.send(
                     network_msg.get_message_type(),
                     network_msg.take_payload(),
-                    peer_id.into(),
+                    peer_id.id_as_string().into(),
                 ) {
                     Ok(()) => (),
                     Err((message_type, _, _)) => {
