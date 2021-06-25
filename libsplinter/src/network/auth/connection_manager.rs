@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(feature = "challenge-authorization")]
+use crate::network::auth::ConnectionAuthorizationType;
 use crate::network::connection_manager::{
     AuthorizationResult, Authorizer, AuthorizerCallback, AuthorizerError,
-    ConnectionAuthorizationType,
 };
 use crate::transport::Connection;
 
