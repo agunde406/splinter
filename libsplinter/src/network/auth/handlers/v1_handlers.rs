@@ -427,7 +427,7 @@ impl Handler for AuthCompleteHandler {
         );
         match self.auth_manager.next_state(
             context.source_connection_id(),
-            AuthorizationAction::Trust(TrustAuthorizationAction::Authorizing),
+            AuthorizationAction::Authorizing,
         ) {
             Err(err) => {
                 warn!(
@@ -437,7 +437,10 @@ impl Handler for AuthCompleteHandler {
                 );
             }
             Ok(AuthorizationState::Trust(TrustAuthorizationState::Authorized(_)))
-            | Ok(AuthorizationState::AuthComplete(_)) => (),
+            | Ok(AuthorizationState::AuthComplete(_))
+            | Ok(AuthorizationState::Challenge(ChallengeAuthorizationState::Authorized {
+                ..
+            })) => (),
             Ok(next_state) => panic!("Should not have been able to transition to {}", next_state),
         }
 
