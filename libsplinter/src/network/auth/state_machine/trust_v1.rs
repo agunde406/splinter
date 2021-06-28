@@ -38,7 +38,7 @@ impl fmt::Display for TrustAuthorizationState {
 /// The state transitions that can be applied on a connection during authorization.
 #[derive(PartialEq, Debug)]
 pub(crate) enum TrustAuthorizationAction {
-    TrustIdentifying(Identity),
+    TrustIdentifying(String),
     Authorizing,
 }
 
@@ -83,8 +83,13 @@ impl TrustAuthorizationState {
                                 local_id,
                             )) => {
                                 cur_state.remote_state =
-                                    AuthorizationState::AuthComplete(Some(local_id.to_string()));
-                                AuthorizationState::AuthComplete(Some(identity.to_string()))
+                                    AuthorizationState::AuthComplete(Some(Identity::Trust {
+                                        identity: local_id.to_string(),
+                                    }));
+
+                                AuthorizationState::AuthComplete(Some(Identity::Trust {
+                                    identity: identity.to_string(),
+                                }))
                             }
                             _ => AuthorizationState::Trust(TrustAuthorizationState::Authorized(
                                 identity.to_string(),
@@ -138,8 +143,12 @@ impl TrustAuthorizationState {
                                 local_id,
                             )) => {
                                 cur_state.local_state =
-                                    AuthorizationState::AuthComplete(Some(local_id.to_string()));
-                                AuthorizationState::AuthComplete(Some(identity.to_string()))
+                                    AuthorizationState::AuthComplete(Some(Identity::Trust {
+                                        identity: local_id.to_string(),
+                                    }));
+                                AuthorizationState::AuthComplete(Some(Identity::Trust {
+                                    identity: identity.to_string(),
+                                }))
                             }
                             _ => AuthorizationState::Trust(TrustAuthorizationState::Authorized(
                                 identity.to_string(),
