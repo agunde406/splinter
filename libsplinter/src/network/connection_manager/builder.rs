@@ -222,6 +222,10 @@ fn handle_request<T: ConnectionMatrixLifeCycle, U: ConnectionMatrixSender>(
             endpoint,
             sender,
             connection_id,
+            #[cfg(feature = "challenge-authorization")]
+            expected_authorization,
+            #[cfg(feature = "challenge-authorization")]
+            local_authorization,
         } => state.add_outbound_connection(
             &endpoint,
             connection_id,
@@ -229,6 +233,10 @@ fn handle_request<T: ConnectionMatrixLifeCycle, U: ConnectionMatrixSender>(
             internal_sender,
             authorizer,
             subscribers,
+            #[cfg(feature = "challenge-authorization")]
+            expected_authorization,
+            #[cfg(feature = "challenge-authorization")]
+            local_authorization,
         ),
         CmRequest::RemoveConnection { endpoint, sender } => {
             let response = state
