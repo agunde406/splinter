@@ -1270,6 +1270,19 @@ mod tests {
         fn clone_box(&self) -> Box<dyn ServiceNetworkSender> {
             Box::new(self.clone())
         }
+
+        #[allow(dead_code)]
+        fn send_with_sender(
+            &mut self,
+            recipient: &str,
+            message: &[u8],
+            _sender: &str,
+        ) -> Result<(), error::ServiceSendError> {
+            self.tx
+                .send((recipient.to_string(), message.to_vec()))
+                .expect("Unable to send test message");
+            Ok(())
+        }
     }
 
     struct MockAdminKeyVerifier;
