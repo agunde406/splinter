@@ -47,7 +47,7 @@ impl From<ConnectionAuthorizationState> for AuthorizationResult {
             } => AuthorizationResult::Authorized {
                 connection_id,
                 connection,
-                identity: ConnectionAuthorizationType::Trust { identity },
+                identity,
             },
 
             ConnectionAuthorizationState::Unauthorized {

@@ -24,12 +24,21 @@ use self::trust_v1::{TrustAuthorizationAction, TrustAuthorizationState};
 
 use super::{ManagedAuthorizationState, ManagedAuthorizations};
 
-type Identity = String;
+#[derive(Debug, PartialEq, Clone)]
+pub enum Identity {
+    Trust {
+        identity: String,
+    },
+    #[cfg(feature = "challenge-authorization")]
+    Challenge {
+        public_key: Vec<u8>,
+    },
+}
 
 #[derive(PartialEq, Debug, Clone)]
 pub(crate) enum AuthorizationState {
     Unknown,
-    AuthComplete(Option<String>),
+    AuthComplete(Option<Identity>),
     Unauthorized,
 
     #[cfg(feature = "trust-authorization")]
