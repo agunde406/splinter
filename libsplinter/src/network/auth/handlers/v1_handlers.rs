@@ -52,11 +52,27 @@ use crate::protos::prelude::*;
 /// Handler for the Authorization Protocol Request Message Type
 pub struct AuthProtocolRequestHandler {
     auth_manager: AuthorizationManagerStateMachine,
+    #[cfg(feature = "challenge-authorization")]
+    challenge_configured: bool,
+    #[cfg(feature = "challenge-authorization")]
+    expected_authorization: Option<ConnectionAuthorizationType>,
 }
 
 impl AuthProtocolRequestHandler {
-    pub fn new(auth_manager: AuthorizationManagerStateMachine) -> Self {
-        Self { auth_manager }
+    pub fn new(
+        auth_manager: AuthorizationManagerStateMachine,
+        #[cfg(feature = "challenge-authorization")] challenge_configured: bool,
+        #[cfg(feature = "challenge-authorization")] expected_authorization: Option<
+            ConnectionAuthorizationType,
+        >,
+    ) -> Self {
+        Self {
+            auth_manager,
+            #[cfg(feature = "challenge-authorization")]
+            challenge_configured,
+            #[cfg(feature = "challenge-authorization")]
+            expected_authorization,
+        }
     }
 }
 
@@ -139,9 +155,32 @@ impl Handler for AuthProtocolRequestHandler {
                     version
                 );
 
+                let mut accepted_authorization_type = vec![];
+                #[cfg(feature = "trust-authorization")]
+                {
+                    accepted_authorization_type.push(PeerAuthorizationType::Trust);
+                }
+
+                #[cfg(feature = "challenge-authorization")]
+                match self.expected_authorization {
+                    #[cfg(feature = "trust-authorization")]
+                    Some(ConnectionAuthorizationType::Trust { .. }) => (),
+                    #[cfg(feature = "challenge-authorization")]
+                    Some(ConnectionAuthorizationType::Challenge { .. }) => {
+                        accepted_authorization_type = vec![PeerAuthorizationType::Challenge]
+                    }
+                    _ => {
+                        // if trust is enabled it was already added
+                        #[cfg(feature = "challenge-authorization")]
+                        if self.challenge_configured {
+                            accepted_authorization_type.push(PeerAuthorizationType::Challenge)
+                        }
+                    }
+                };
+
                 let response = AuthorizationMessage::AuthProtocolResponse(AuthProtocolResponse {
                     auth_protocol: version,
-                    accepted_authorization_type: vec![PeerAuthorizationType::Trust],
+                    accepted_authorization_type,
                 });
 
                 let msg_bytes = IntoBytes::<network::NetworkMessage>::into_bytes(
@@ -196,14 +235,22 @@ fn supported_protocol_version(min: u32, max: u32) -> u32 {
 /// Handler for the Authorization Protocol Response Message Type
 pub struct AuthProtocolResponseHandler {
     auth_manager: AuthorizationManagerStateMachine,
+    #[cfg(feature = "trust-authorization")]
     identity: String,
+    required_local_auth: Option<ConnectionAuthorizationType>,
 }
 
 impl AuthProtocolResponseHandler {
-    pub fn new(auth_manager: AuthorizationManagerStateMachine, identity: String) -> Self {
+    pub fn new(
+        auth_manager: AuthorizationManagerStateMachine,
+        #[cfg(feature = "trust-authorization")] identity: String,
+        required_local_auth: Option<ConnectionAuthorizationType>,
+    ) -> Self {
         Self {
             auth_manager,
+            #[cfg(feature = "trust-authorization")]
             identity,
+            required_local_auth,
         }
     }
 }
@@ -227,8 +274,10 @@ impl Handler for AuthProtocolResponseHandler {
             "Received authorization protocol response from {}",
             context.source_connection_id()
         );
+
         let protocol_request = AuthProtocolResponse::from_proto(msg)?;
 
+        let mut msg_bytes = vec![];
         match self.auth_manager.next_state(
             context.source_connection_id(),
             AuthorizationAction::ProtocolAgreeing,
@@ -240,27 +289,157 @@ impl Handler for AuthProtocolResponseHandler {
                     err
                 );
             }
-
             Ok(AuthorizationState::ProtocolAgreeing) => {
-                if protocol_request
-                    .accepted_authorization_type
-                    .iter()
-                    .any(|t| matches!(t, PeerAuthorizationType::Trust))
-                {
-                    let trust_request = AuthorizationMessage::AuthTrustRequest(AuthTrustRequest {
-                        identity: self.identity.clone(),
-                    });
+                match self.required_local_auth {
+                    #[cfg(feature = "challenge-authorization")]
+                    Some(ConnectionAuthorizationType::Challenge { .. }) => {
+                        if protocol_request
+                            .accepted_authorization_type
+                            .iter()
+                            .any(|t| matches!(t, PeerAuthorizationType::Challenge))
+                        {
+                            let nonce_request = AuthorizationMessage::AuthChallengeNonceRequest(
+                                AuthChallengeNonceRequest,
+                            );
 
-                    let msg_bytes = IntoBytes::<network::NetworkMessage>::into_bytes(
-                        NetworkMessage::from(trust_request),
-                    )?;
+                            msg_bytes = IntoBytes::<network::NetworkMessage>::into_bytes(
+                                NetworkMessage::from(nonce_request),
+                            )?;
+                        } else {
+                            let response = AuthorizationMessage::AuthorizationError(
+                                AuthorizationError::AuthorizationRejected(
+                                    "Required authorization type not supported".into(),
+                                ),
+                            );
 
-                    sender
-                        .send(context.source_id().clone(), msg_bytes)
-                        .map_err(|(recipient, payload)| {
-                            DispatchError::NetworkSendError((recipient.into(), payload))
-                        })?;
-                }
+                            msg_bytes = IntoBytes::<network::NetworkMessage>::into_bytes(
+                                NetworkMessage::from(response),
+                            )?;
+
+                            if self
+                                .auth_manager
+                                .next_state(
+                                    context.source_connection_id(),
+                                    AuthorizationAction::Unauthorizing,
+                                )
+                                .is_err()
+                            {
+                                warn!(
+                                    "Unable to update state to Unauthorizing for {}",
+                                    context.source_connection_id(),
+                                )
+                            };
+                        }
+                    }
+                    #[cfg(feature = "trust-authorization")]
+                    Some(ConnectionAuthorizationType::Trust { .. }) => {
+                        if protocol_request
+                            .accepted_authorization_type
+                            .iter()
+                            .any(|t| matches!(t, PeerAuthorizationType::Trust))
+                        {
+                            let trust_request =
+                                AuthorizationMessage::AuthTrustRequest(AuthTrustRequest {
+                                    identity: self.identity.clone(),
+                                });
+
+                            msg_bytes = IntoBytes::<network::NetworkMessage>::into_bytes(
+                                NetworkMessage::from(trust_request),
+                            )?;
+                        } else {
+                            let response = AuthorizationMessage::AuthorizationError(
+                                AuthorizationError::AuthorizationRejected(
+                                    "Required authorization type not supported".into(),
+                                ),
+                            );
+
+                            msg_bytes = IntoBytes::<network::NetworkMessage>::into_bytes(
+                                NetworkMessage::from(response),
+                            )?;
+
+                            if self
+                                .auth_manager
+                                .next_state(
+                                    context.source_connection_id(),
+                                    AuthorizationAction::Unauthorizing,
+                                )
+                                .is_err()
+                            {
+                                warn!(
+                                    "Unable to update state to Unauthorizing for {}",
+                                    context.source_connection_id(),
+                                )
+                            };
+                        }
+                    }
+                    _ => {
+                        #[cfg(feature = "challenge-authorization")]
+                        if protocol_request
+                            .accepted_authorization_type
+                            .iter()
+                            .any(|t| matches!(t, PeerAuthorizationType::Challenge))
+                        {
+                            let nonce_request = AuthorizationMessage::AuthChallengeNonceRequest(
+                                AuthChallengeNonceRequest,
+                            );
+
+                            msg_bytes = IntoBytes::<network::NetworkMessage>::into_bytes(
+                                NetworkMessage::from(nonce_request),
+                            )?;
+                        }
+                        #[cfg(feature = "trust-authorization")]
+                        if protocol_request
+                            .accepted_authorization_type
+                            .iter()
+                            .any(|t| matches!(t, PeerAuthorizationType::Trust))
+                        {
+                            let trust_request =
+                                AuthorizationMessage::AuthTrustRequest(AuthTrustRequest {
+                                    identity: self.identity.clone(),
+                                });
+
+                            msg_bytes = IntoBytes::<network::NetworkMessage>::into_bytes(
+                                NetworkMessage::from(trust_request),
+                            )?;
+                        }
+
+                        #[cfg(not(any(
+                            feature = "trust-authorization",
+                            feature = "challenge-authorization"
+                        )))]
+                        {
+                            let response = AuthorizationMessage::AuthorizationError(
+                                AuthorizationError::AuthorizationRejected(
+                                    "Required authorization type not supported".into(),
+                                ),
+                            );
+
+                            msg_bytes = IntoBytes::<network::NetworkMessage>::into_bytes(
+                                NetworkMessage::from(response),
+                            )?;
+
+                            if self
+                                .auth_manager
+                                .next_state(
+                                    context.source_connection_id(),
+                                    AuthorizationAction::Unauthorizing,
+                                )
+                                .is_err()
+                            {
+                                warn!(
+                                    "Unable to update state to Unauthorizing for {}",
+                                    context.source_connection_id(),
+                                )
+                            };
+                        }
+                    }
+                };
+
+                sender
+                    .send(context.source_id().clone(), msg_bytes)
+                    .map_err(|(recipient, payload)| {
+                        DispatchError::NetworkSendError((recipient.into(), payload))
+                    })?;
             }
             Ok(next_state) => panic!("Should not have been able to transition to {}", next_state),
         }

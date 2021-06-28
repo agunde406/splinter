@@ -94,11 +94,20 @@ pub fn create_authorization_dispatcher(
     {
         auth_dispatcher.set_handler(Box::new(AuthProtocolRequestHandler::new(
             auth_manager.clone(),
+            #[cfg(feature = "challenge-authorization")]
+            !signers.is_empty(),
+            #[cfg(feature = "challenge-authorization")]
+            expected_authorization.clone(),
         )));
 
         auth_dispatcher.set_handler(Box::new(AuthProtocolResponseHandler::new(
             auth_manager.clone(),
+            #[cfg(feature = "trust-authorization")]
             identity.to_string(),
+            #[cfg(feature = "challenge-authorization")]
+            local_authorization.clone(),
+            #[cfg(not(feature = "challenge-authorization"))]
+            None,
         )));
 
         auth_dispatcher.set_handler(Box::new(AuthCompleteHandler::new(auth_manager.clone())));
