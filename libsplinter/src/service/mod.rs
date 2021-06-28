@@ -99,6 +99,15 @@ pub trait ServiceNetworkSender: Send {
 
     /// Clone this instance into Boxed, dynamic trait
     fn clone_box(&self) -> Box<dyn ServiceNetworkSender>;
+
+    /// Send the message bytes to the given recipient (another service) with a configurable
+    /// message sender
+    fn send_with_sender(
+        &mut self,
+        recipient: &str,
+        message: &[u8],
+        sender: &str,
+    ) -> Result<(), ServiceSendError>;
 }
 
 impl Clone for Box<dyn ServiceNetworkSender> {
