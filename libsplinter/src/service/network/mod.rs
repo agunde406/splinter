@@ -188,17 +188,21 @@ impl ServiceConnectionManager {
     /// For example:
     ///
     /// ```no_run
+    /// # use std::sync::{Arc, Mutex};
     /// # use splinter::mesh::Mesh;
     /// # use splinter::network::auth::AuthorizationManager;
     /// # use splinter::network::connection_manager::{Authorizer, ConnectionManager};
     /// # use splinter::service::network::ServiceConnectionManager;
     /// # use splinter::transport::inproc::InprocTransport;
+    /// # use cylinder::secp256k1::Secp256k1Context;
     /// # let transport = InprocTransport::default();
     /// # let mesh = Mesh::new(1, 1);
     /// # let auth_mgr = AuthorizationManager::new(
     /// #   "test_identity".into(),
     /// #    #[cfg(feature = "challenge-authorization")]
     /// #    vec![],
+    /// #    #[cfg(feature = "challenge-authorization")]
+    /// #    Arc::new(Mutex::new(Box::new(Secp256k1Context::new()))),
     /// # ).unwrap();
     /// # let authorizer: Box<dyn Authorizer + Send> = Box::new(auth_mgr.authorization_connector());
     /// let mut cm = ConnectionManager::builder()

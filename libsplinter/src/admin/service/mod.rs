@@ -993,6 +993,8 @@ mod tests {
             "test-node".into(),
             #[cfg(feature = "challenge-authorization")]
             vec![],
+            #[cfg(feature = "challenge-authorization")]
+            Arc::new(Mutex::new(Box::new(Secp256k1Context::new()))),
         )
         .expect("Unable to create authorization pool");
         let mut authorizers = Authorizers::new();
