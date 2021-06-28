@@ -22,7 +22,7 @@ use std::fmt;
 use std::sync::{mpsc, Arc, Mutex};
 
 #[cfg(feature = "challenge-authorization")]
-use cylinder::Signer;
+use cylinder::{Signer, SigningError, VerifierFactory};
 use protobuf::Message;
 
 #[cfg(feature = "trust-authorization")]
@@ -73,8 +73,12 @@ pub struct AuthorizationManager {
     local_identity: String,
     #[cfg(feature = "challenge-authorization")]
     signers: Vec<Box<dyn Signer>>,
+    #[cfg(feature = "challenge-authorization")]
+    public_keys: Vec<Vec<u8>>,
     thread_pool: ThreadPool,
     shared: Arc<Mutex<ManagedAuthorizations>>,
+    #[cfg(feature = "challenge-authorization")]
+    verifier_factory: Arc<Mutex<Box<dyn VerifierFactory>>>,
 }
 
 impl AuthorizationManager {
@@ -82,6 +86,9 @@ impl AuthorizationManager {
     pub fn new(
         local_identity: String,
         #[cfg(feature = "challenge-authorization")] signers: Vec<Box<dyn Signer>>,
+        #[cfg(feature = "challenge-authorization")] verifier_factory: Arc<
+            Mutex<Box<dyn VerifierFactory>>,
+        >,
     ) -> Result<Self, AuthorizationManagerError> {
         let thread_pool = ThreadPoolBuilder::new()
             .with_size(AUTHORIZATION_THREAD_POOL_SIZE)
@@ -91,12 +98,25 @@ impl AuthorizationManager {
 
         let shared = Arc::new(Mutex::new(ManagedAuthorizations::new()));
 
+        #[cfg(feature = "challenge-authorization")]
+        let public_keys = signers
+            .iter()
+            .map(|signer| Ok(signer.public_key()?.into_bytes()))
+            .collect::<Result<Vec<Vec<u8>>, SigningError>>()
+            .map_err(|_| {
+                AuthorizationManagerError("Unable to get public keys from signers".to_string())
+            })?;
+
         Ok(Self {
             local_identity,
             #[cfg(feature = "challenge-authorization")]
             signers,
+            #[cfg(feature = "challenge-authorization")]
+            public_keys,
             thread_pool,
             shared,
+            #[cfg(feature = "challenge-authorization")]
+            verifier_factory,
         })
     }
 
@@ -117,6 +137,10 @@ impl AuthorizationManager {
             signers: self.signers.clone(),
             shared: Arc::clone(&self.shared),
             executor: self.thread_pool.executor(),
+            #[cfg(feature = "challenge-authorization")]
+            verifier_factory: self.verifier_factory.clone(),
+            #[cfg(feature = "challenge-authorization")]
+            public_keys: self.public_keys.clone(),
         }
     }
 }
@@ -140,6 +164,10 @@ pub struct AuthorizationConnector {
     signers: Vec<Box<dyn Signer>>,
     shared: Arc<Mutex<ManagedAuthorizations>>,
     executor: pool::JobExecutor,
+    #[cfg(feature = "challenge-authorization")]
+    verifier_factory: Arc<Mutex<Box<dyn VerifierFactory>>>,
+    #[cfg(feature = "challenge-authorization")]
+    public_keys: Vec<Vec<u8>>,
 }
 
 impl AuthorizationConnector {
@@ -147,6 +175,12 @@ impl AuthorizationConnector {
         &self,
         connection_id: String,
         connection: Box<dyn Connection>,
+        #[cfg(feature = "challenge-authorization")] expected_authorization: Option<
+            ConnectionAuthorizationType,
+        >,
+        #[cfg(feature = "challenge-authorization")] local_authorization: Option<
+            ConnectionAuthorizationType,
+        >,
         on_complete_callback: Callback,
     ) -> Result<(), AuthorizationManagerError> {
         let mut connection = connection;
@@ -157,13 +191,36 @@ impl AuthorizationConnector {
             shared: Arc::clone(&self.shared),
         };
         let msg_sender = AuthorizationMessageSender { sender: tx };
+        #[cfg(feature = "challenge-authorization")]
+        let verifier = self
+            .verifier_factory
+            .lock()
+            .map_err(|_| AuthorizationManagerError("VerifierFactory lock poisoned".to_string()))?
+            .new_verifier();
+
+        #[cfg(feature = "challenge-authorization")]
+        let nonce: Vec<u8> = (0..70).map(|_| rand::random::<u8>()).collect();
         let dispatcher = create_authorization_dispatcher(
             self.local_identity.clone(),
             #[cfg(feature = "challenge-authorization")]
             self.signers.clone(),
             state_machine,
             msg_sender,
-        );
+            #[cfg(feature = "challenge-authorization")]
+            nonce,
+            #[cfg(feature = "challenge-authorization")]
+            expected_authorization.clone(),
+            #[cfg(feature = "challenge-authorization")]
+            local_authorization.clone(),
+            #[cfg(feature = "challenge-authorization")]
+            verifier,
+            #[cfg(feature = "challenge-authorization")]
+            self.public_keys.clone(),
+        )
+        .map_err(|err| {
+            AuthorizationManagerError(format!("Unable to setup authorization dispatcher: {}", err))
+        })?;
+
         self.executor.execute(move || {
             #[cfg(not(feature = "trust-authorization"))]
             {
@@ -277,6 +334,10 @@ impl AuthorizationConnector {
                     Identity::Trust { identity } => ConnectionAuthorizationState::Authorized {
                         connection_id,
                         connection,
+                        #[cfg(feature = "challenge-authorization")]
+                        expected_authorization,
+                        #[cfg(feature = "challenge-authorization")]
+                        local_authorization,
                         identity: ConnectionAuthorizationType::Trust { identity },
                     },
                     #[cfg(feature = "challenge-authorization")]
@@ -285,6 +346,8 @@ impl AuthorizationConnector {
                             connection_id: connection_id.clone(),
                             connection,
                             identity: ConnectionAuthorizationType::Challenge { public_key },
+                            expected_authorization,
+                            local_authorization,
                         }
                     }
                 }
@@ -393,6 +456,11 @@ pub enum ConnectionAuthorizationState {
         connection_id: String,
         identity: ConnectionAuthorizationType,
         connection: Box<dyn Connection>,
+        // information required if reconnect needs to be attempted
+        #[cfg(feature = "challenge-authorization")]
+        expected_authorization: Option<ConnectionAuthorizationType>,
+        #[cfg(feature = "challenge-authorization")]
+        local_authorization: Option<ConnectionAuthorizationType>,
     },
     Unauthorized {
         connection_id: String,

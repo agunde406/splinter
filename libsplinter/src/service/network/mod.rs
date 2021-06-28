@@ -775,6 +775,12 @@ mod tests {
             connection_id: String,
             connection: Box<dyn Connection>,
             callback: AuthorizerCallback,
+            #[cfg(feature = "challenge-authorization")] expected_authorization: Option<
+                ConnectionAuthorizationType,
+            >,
+            #[cfg(feature = "challenge-authorization")] local_authorization: Option<
+                ConnectionAuthorizationType,
+            >,
         ) -> Result<(), AuthorizerError> {
             (*callback)(AuthorizationResult::Authorized {
                 connection_id,
@@ -782,6 +788,10 @@ mod tests {
                 identity: ConnectionAuthorizationType::Trust {
                     identity: self.authorized_id.clone(),
                 },
+                #[cfg(feature = "challenge-authorization")]
+                expected_authorization,
+                #[cfg(feature = "challenge-authorization")]
+                local_authorization,
             })
             .map_err(|err| AuthorizerError(format!("Unable to return result: {}", err)))
         }

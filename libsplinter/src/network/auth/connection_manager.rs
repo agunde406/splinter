@@ -27,10 +27,20 @@ impl Authorizer for AuthorizationConnector {
         connection_id: String,
         connection: Box<dyn Connection>,
         callback: AuthorizerCallback,
+        #[cfg(feature = "challenge-authorization")] expected_authorization: Option<
+            ConnectionAuthorizationType,
+        >,
+        #[cfg(feature = "challenge-authorization")] local_authorization: Option<
+            ConnectionAuthorizationType,
+        >,
     ) -> Result<(), AuthorizerError> {
         self.add_connection(
             connection_id,
             connection,
+            #[cfg(feature = "challenge-authorization")]
+            expected_authorization,
+            #[cfg(feature = "challenge-authorization")]
+            local_authorization,
             Box::new(move |state| (*callback)(state.into())),
         )
         .map_err(AuthorizerError::from)
@@ -44,10 +54,18 @@ impl From<ConnectionAuthorizationState> for AuthorizationResult {
                 connection_id,
                 connection,
                 identity,
+                #[cfg(feature = "challenge-authorization")]
+                expected_authorization,
+                #[cfg(feature = "challenge-authorization")]
+                local_authorization,
             } => AuthorizationResult::Authorized {
                 connection_id,
                 connection,
                 identity,
+                #[cfg(feature = "challenge-authorization")]
+                expected_authorization,
+                #[cfg(feature = "challenge-authorization")]
+                local_authorization,
             },
 
             ConnectionAuthorizationState::Unauthorized {
