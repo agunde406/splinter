@@ -25,8 +25,8 @@ use crate::error::InvalidStateError;
 #[cfg(feature = "challenge-authorization")]
 use crate::network::auth::ConnectionAuthorizationType;
 use crate::network::auth::{
-    AuthorizationAction, AuthorizationManagerStateMachine, AuthorizationMessageSender,
-    AuthorizationState,
+    AuthorizationLocalAction, AuthorizationLocalState, AuthorizationManagerStateMachine,
+    AuthorizationMessageSender,
 };
 use crate::network::dispatch::{
     ConnectionId, DispatchError, Dispatcher, Handler, MessageContext, MessageSender,
@@ -72,7 +72,6 @@ pub fn create_authorization_dispatcher(
         ConnectionAuthorizationType,
     >,
     #[cfg(feature = "challenge-authorization")] verifer: Box<dyn Verifier>,
-    #[cfg(feature = "challenge-authorization")] public_keys: Vec<Vec<u8>>,
 ) -> Result<Dispatcher<NetworkMessageType, ConnectionId>, InvalidStateError> {
     let mut auth_dispatcher = Dispatcher::new(Box::new(auth_msg_sender.clone()));
 
@@ -119,7 +118,6 @@ pub fn create_authorization_dispatcher(
 
         auth_dispatcher.set_handler(Box::new(AuthTrustResponseHandler::new(
             auth_manager.clone(),
-            identity,
         )));
     }
 
@@ -169,15 +167,8 @@ pub fn create_authorization_dispatcher(
             expected_public_key,
         )));
 
-        let expected_local_public_key = match local_authorization {
-            Some(ConnectionAuthorizationType::Challenge { public_key }) => Some(public_key),
-            // if there is no local_authorization which key is used here does not matter
-            _ => public_keys.get(0).cloned(),
-        };
-
         auth_dispatcher.set_handler(Box::new(AuthChallengeSubmitResponseHandler::new(
             auth_manager.clone(),
-            expected_local_public_key,
         )));
     }
 
@@ -261,11 +252,11 @@ impl Handler for AuthorizationErrorHandler {
         let auth_error = AuthorizationError::from_proto(msg)?;
         match auth_error {
             AuthorizationError::AuthorizationRejected(err_msg) => {
-                match self.auth_manager.next_state(
+                match self.auth_manager.next_local_state(
                     context.source_connection_id(),
-                    AuthorizationAction::Unauthorizing,
+                    AuthorizationLocalAction::Unauthorizing,
                 ) {
-                    Ok(AuthorizationState::Unauthorized) => {
+                    Ok(AuthorizationLocalState::Unauthorized) => {
                         info!(
                             "Connection unauthorized by connection {}: {}",
                             context.source_connection_id(),

@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use cylinder::VerifierFactory;
+use cylinder::{Signer, VerifierFactory};
 use splinter::admin::service::admin_service_id;
 use splinter::circuit::handlers::{
     AdminDirectMessageHandler, CircuitDirectMessageHandler, CircuitErrorHandler,

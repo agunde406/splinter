@@ -19,15 +19,17 @@ use cylinder::{PublicKey, Signature, Signer, Verifier};
 
 #[cfg(feature = "challenge-authorization")]
 use crate::network::auth::state_machine::challenge_v1::{
-    ChallengeAuthorizationAction, ChallengeAuthorizationState,
+    ChallengeAuthorizationLocalAction, ChallengeAuthorizationLocalState,
+    ChallengeAuthorizationRemoteAction, ChallengeAuthorizationRemoteState,
 };
 #[cfg(feature = "trust-authorization")]
 use crate::network::auth::state_machine::trust_v1::{
-    TrustAuthorizationAction, TrustAuthorizationState,
+    TrustAuthorizationLocalAction, TrustAuthorizationRemoteAction, TrustAuthorizationRemoteState,
 };
 use crate::network::auth::{
-    AuthorizationAction, AuthorizationManagerStateMachine, AuthorizationMessage,
-    AuthorizationState, ConnectionAuthorizationType,
+    AuthorizationLocalAction, AuthorizationLocalState, AuthorizationManagerStateMachine,
+    AuthorizationMessage, AuthorizationRemoteAction, AuthorizationRemoteState,
+    ConnectionAuthorizationType, Identity,
 };
 use crate::network::dispatch::{
     ConnectionId, DispatchError, Handler, MessageContext, MessageSender,
@@ -99,7 +101,7 @@ impl Handler for AuthProtocolRequestHandler {
 
         match self.auth_manager.next_remote_state(
             context.source_connection_id(),
-            AuthorizationAction::ProtocolAgreeing,
+            AuthorizationRemoteAction::ReceiveAuthProtocolRequest,
         ) {
             Err(err) => {
                 warn!(
@@ -109,7 +111,7 @@ impl Handler for AuthProtocolRequestHandler {
                 );
             }
 
-            Ok(AuthorizationState::ProtocolAgreeing) => {
+            Ok(AuthorizationRemoteState::ReceivedAuthProtocolRequest) => {
                 let version = supported_protocol_version(
                     protocol_request.auth_protocol_min,
                     protocol_request.auth_protocol_max,
@@ -137,7 +139,7 @@ impl Handler for AuthProtocolRequestHandler {
                         .auth_manager
                         .next_remote_state(
                             context.source_connection_id(),
-                            AuthorizationAction::Unauthorizing,
+                            AuthorizationRemoteAction::Unauthorizing,
                         )
                         .is_err()
                     {
@@ -192,6 +194,20 @@ impl Handler for AuthProtocolRequestHandler {
                     .map_err(|(recipient, payload)| {
                         DispatchError::NetworkSendError((recipient.into(), payload))
                     })?;
+
+                if self
+                    .auth_manager
+                    .next_remote_state(
+                        context.source_connection_id(),
+                        AuthorizationRemoteAction::SendAuthProtocolResponse,
+                    )
+                    .is_err()
+                {
+                    error!(
+                        "Unable to transition from ReceivedAuthProtocolRequest to \
+                        SentAuthProtocolResponse"
+                    )
+                };
             }
             Ok(next_state) => panic!("Should not have been able to transition to {}", next_state),
         }
@@ -278,9 +294,9 @@ impl Handler for AuthProtocolResponseHandler {
         let protocol_request = AuthProtocolResponse::from_proto(msg)?;
 
         let mut msg_bytes = vec![];
-        match self.auth_manager.next_state(
+        match self.auth_manager.next_local_state(
             context.source_connection_id(),
-            AuthorizationAction::ProtocolAgreeing,
+            AuthorizationLocalAction::ReceiveAuthProtocolResponse,
         ) {
             Err(err) => {
                 warn!(
@@ -289,7 +305,7 @@ impl Handler for AuthProtocolResponseHandler {
                     err
                 );
             }
-            Ok(AuthorizationState::ProtocolAgreeing) => {
+            Ok(AuthorizationLocalState::ReceivedAuthProtocolResponse) => {
                 match self.required_local_auth {
                     #[cfg(feature = "challenge-authorization")]
                     Some(ConnectionAuthorizationType::Challenge { .. }) => {
@@ -301,6 +317,20 @@ impl Handler for AuthProtocolResponseHandler {
                             let nonce_request = AuthorizationMessage::AuthChallengeNonceRequest(
                                 AuthChallengeNonceRequest,
                             );
+
+                            let action = AuthorizationLocalAction::Challenge(
+                                ChallengeAuthorizationLocalAction::SendAuthChallengeNonceRequest,
+                            );
+                            if self
+                                .auth_manager
+                                .next_local_state(context.source_connection_id(), action)
+                                .is_err()
+                            {
+                                error!(
+                                    "Unable to transition from ReceivedAuthProtocolResponse to \
+                                    WaitingForAuthChallengeNonceResponse"
+                                )
+                            };
 
                             msg_bytes = IntoBytes::<network::NetworkMessage>::into_bytes(
                                 NetworkMessage::from(nonce_request),
@@ -318,9 +348,9 @@ impl Handler for AuthProtocolResponseHandler {
 
                             if self
                                 .auth_manager
-                                .next_state(
+                                .next_local_state(
                                     context.source_connection_id(),
-                                    AuthorizationAction::Unauthorizing,
+                                    AuthorizationLocalAction::Unauthorizing,
                                 )
                                 .is_err()
                             {
@@ -343,6 +373,22 @@ impl Handler for AuthProtocolResponseHandler {
                                     identity: self.identity.clone(),
                                 });
 
+                            if self
+                                .auth_manager
+                                .next_local_state(
+                                    context.source_connection_id(),
+                                    AuthorizationLocalAction::Trust(
+                                        TrustAuthorizationLocalAction::SendAuthTrustRequest,
+                                    ),
+                                )
+                                .is_err()
+                            {
+                                error!(
+                                    "Unable to transition from ReceivedAuthProtocolResponse to \
+                                    WaitingForAuthTrustResponse"
+                                )
+                            };
+
                             msg_bytes = IntoBytes::<network::NetworkMessage>::into_bytes(
                                 NetworkMessage::from(trust_request),
                             )?;
@@ -359,9 +405,9 @@ impl Handler for AuthProtocolResponseHandler {
 
                             if self
                                 .auth_manager
-                                .next_state(
+                                .next_local_state(
                                     context.source_connection_id(),
-                                    AuthorizationAction::Unauthorizing,
+                                    AuthorizationLocalAction::Unauthorizing,
                                 )
                                 .is_err()
                             {
@@ -383,6 +429,20 @@ impl Handler for AuthProtocolResponseHandler {
                                 AuthChallengeNonceRequest,
                             );
 
+                            let action = AuthorizationLocalAction::Challenge(
+                                ChallengeAuthorizationLocalAction::SendAuthChallengeNonceRequest,
+                            );
+                            if self
+                                .auth_manager
+                                .next_local_state(context.source_connection_id(), action)
+                                .is_err()
+                            {
+                                error!(
+                                    "Unable to transition from ReceivedAuthProtocolResponse to \
+                                    WaitingForAuthChallengeNonceResponse"
+                                )
+                            };
+
                             msg_bytes = IntoBytes::<network::NetworkMessage>::into_bytes(
                                 NetworkMessage::from(nonce_request),
                             )?;
@@ -397,6 +457,22 @@ impl Handler for AuthProtocolResponseHandler {
                                 AuthorizationMessage::AuthTrustRequest(AuthTrustRequest {
                                     identity: self.identity.clone(),
                                 });
+
+                            if self
+                                .auth_manager
+                                .next_local_state(
+                                    context.source_connection_id(),
+                                    AuthorizationLocalAction::Trust(
+                                        TrustAuthorizationLocalAction::SendAuthTrustRequest,
+                                    ),
+                                )
+                                .is_err()
+                            {
+                                error!(
+                                    "Unable to transition from ReceivedAuthProtocolResponse to \
+                                    WaitingForAuthTrustResponse"
+                                )
+                            };
 
                             msg_bytes = IntoBytes::<network::NetworkMessage>::into_bytes(
                                 NetworkMessage::from(trust_request),
@@ -420,9 +496,9 @@ impl Handler for AuthProtocolResponseHandler {
 
                             if self
                                 .auth_manager
-                                .next_state(
+                                .next_local_state(
                                     context.source_connection_id(),
-                                    AuthorizationAction::Unauthorizing,
+                                    AuthorizationLocalAction::Unauthorizing,
                                 )
                                 .is_err()
                             {
@@ -483,9 +559,11 @@ impl Handler for AuthTrustRequestHandler {
         let trust_request = AuthTrustRequest::from_proto(msg)?;
         match self.auth_manager.next_remote_state(
             context.source_connection_id(),
-            AuthorizationAction::Trust(TrustAuthorizationAction::TrustIdentifying(
-                trust_request.identity,
-            )),
+            AuthorizationRemoteAction::Trust(
+                TrustAuthorizationRemoteAction::ReceiveAuthTrustRequest(Identity::Trust {
+                    identity: trust_request.identity.to_string(),
+                }),
+            ),
         ) {
             Err(err) => {
                 warn!(
@@ -495,11 +573,13 @@ impl Handler for AuthTrustRequestHandler {
                 );
                 return Ok(());
             }
-            Ok(AuthorizationState::Trust(TrustAuthorizationState::Identified(identity))) => {
+            Ok(AuthorizationRemoteState::Trust(
+                TrustAuthorizationRemoteState::ReceivedAuthTrustRequest(_),
+            )) => {
                 debug!(
                     "Sending trust response to connection {} after receiving identity {}",
                     context.source_connection_id(),
-                    identity,
+                    trust_request.identity,
                 );
                 let auth_msg = AuthorizationMessage::AuthTrustResponse(AuthTrustResponse);
                 let msg_bytes = IntoBytes::<network::NetworkMessage>::into_bytes(
@@ -518,21 +598,14 @@ impl Handler for AuthTrustRequestHandler {
             .auth_manager
             .next_remote_state(
                 context.source_connection_id(),
-                AuthorizationAction::Trust(TrustAuthorizationAction::Authorizing),
+                AuthorizationRemoteAction::Trust(
+                    TrustAuthorizationRemoteAction::SendAuthTrustResponse,
+                ),
             )
             .is_err()
         {
-            error!("Unable to transition from TrustIdentified to Authorized")
+            error!("Unable to transition from ReceivedAuthTrustRequest to Done")
         };
-
-        let auth_msg = AuthorizationMessage::AuthComplete(AuthComplete);
-        let msg_bytes =
-            IntoBytes::<network::NetworkMessage>::into_bytes(NetworkMessage::from(auth_msg))?;
-        sender
-            .send(context.source_id().clone(), msg_bytes)
-            .map_err(|(recipient, payload)| {
-                DispatchError::NetworkSendError((recipient.into(), payload))
-            })?;
 
         Ok(())
     }
@@ -542,16 +615,12 @@ impl Handler for AuthTrustRequestHandler {
 /// Handler for the Authorization Trust Response Message Type
 pub struct AuthTrustResponseHandler {
     auth_manager: AuthorizationManagerStateMachine,
-    identity: String,
 }
 
 #[cfg(feature = "trust-authorization")]
 impl AuthTrustResponseHandler {
-    pub fn new(auth_manager: AuthorizationManagerStateMachine, identity: String) -> Self {
-        Self {
-            auth_manager,
-            identity,
-        }
+    pub fn new(auth_manager: AuthorizationManagerStateMachine) -> Self {
+        Self { auth_manager }
     }
 }
 
@@ -569,17 +638,17 @@ impl Handler for AuthTrustResponseHandler {
         &self,
         _msg: Self::Message,
         context: &MessageContext<Self::Source, Self::MessageType>,
-        _sender: &dyn MessageSender<Self::Source>,
+        sender: &dyn MessageSender<Self::Source>,
     ) -> Result<(), DispatchError> {
         debug!(
             "Received authorization trust response from {}",
             context.source_connection_id()
         );
-        match self.auth_manager.next_state(
+        match self.auth_manager.next_local_state(
             context.source_connection_id(),
-            AuthorizationAction::Trust(TrustAuthorizationAction::TrustIdentifying(
-                self.identity.clone(),
-            )),
+            AuthorizationLocalAction::Trust(
+                TrustAuthorizationLocalAction::ReceiveAuthTrustResponse,
+            ),
         ) {
             Err(err) => {
                 warn!(
@@ -588,9 +657,34 @@ impl Handler for AuthTrustResponseHandler {
                     err
                 );
             }
-            Ok(AuthorizationState::Trust(TrustAuthorizationState::Identified(_))) => (),
+            Ok(AuthorizationLocalState::Authorized) => (),
             Ok(next_state) => panic!("Should not have been able to transition to {}", next_state),
         }
+
+        let auth_msg = AuthorizationMessage::AuthComplete(AuthComplete);
+        let msg_bytes =
+            IntoBytes::<network::NetworkMessage>::into_bytes(NetworkMessage::from(auth_msg))?;
+        sender
+            .send(context.source_id().clone(), msg_bytes)
+            .map_err(|(recipient, payload)| {
+                DispatchError::NetworkSendError((recipient.into(), payload))
+            })?;
+
+        match self.auth_manager.next_local_state(
+            context.source_connection_id(),
+            AuthorizationLocalAction::SendAuthComplete,
+        ) {
+            Err(err) => {
+                warn!(
+                    "Cannot transition connection from Authorized {}: {}",
+                    context.source_connection_id(),
+                    err
+                );
+            }
+            Ok(AuthorizationLocalState::WaitForComplete) => (),
+            Ok(AuthorizationLocalState::AuthorizedAndComplete) => (),
+            Ok(next_state) => panic!("Should not have been able to transition to {}", next_state),
+        };
 
         Ok(())
     }
@@ -636,9 +730,9 @@ impl Handler for AuthChallengeNonceRequestHandler {
 
         match self.auth_manager.next_remote_state(
             context.source_connection_id(),
-            AuthorizationAction::Challenge(ChallengeAuthorizationAction::AddingNonce {
-                nonce: self.nonce.to_vec(),
-            }),
+            AuthorizationRemoteAction::Challenge(
+                ChallengeAuthorizationRemoteAction::ReceiveAuthChallengeNonceRequest,
+            ),
         ) {
             Err(err) => {
                 warn!(
@@ -647,10 +741,12 @@ impl Handler for AuthChallengeNonceRequestHandler {
                     err
                 );
             }
-            Ok(AuthorizationState::Challenge(ChallengeAuthorizationState::NonceSent { nonce })) => {
+            Ok(AuthorizationRemoteState::Challenge(
+                ChallengeAuthorizationRemoteState::ReceivedAuthChallengeNonce,
+            )) => {
                 let auth_msg =
                     AuthorizationMessage::AuthChallengeNonceResponse(AuthChallengeNonceResponse {
-                        nonce,
+                        nonce: self.nonce.clone(),
                     });
 
                 let msg_bytes = IntoBytes::<network::NetworkMessage>::into_bytes(
@@ -662,6 +758,22 @@ impl Handler for AuthChallengeNonceRequestHandler {
                     .map_err(|(recipient, payload)| {
                         DispatchError::NetworkSendError((recipient.into(), payload))
                     })?;
+
+                if self
+                    .auth_manager
+                    .next_remote_state(
+                        context.source_connection_id(),
+                        AuthorizationRemoteAction::Challenge(
+                            ChallengeAuthorizationRemoteAction::SendAuthChallengeNonceResponse,
+                        ),
+                    )
+                    .is_err()
+                {
+                    error!(
+                        "Unable to transition from ReceivedAuthChallengeNonceRequest to \
+                        WaitingForAuthChallengeSubmitRequest"
+                    );
+                };
             }
             Ok(next_state) => panic!("Should not have been able to transition to {}", next_state),
         }
@@ -748,11 +860,11 @@ impl Handler for AuthChallengeNonceResponseHandler {
             })
             .collect::<Result<Vec<SubmitRequest>, DispatchError>>()?;
 
-        match self.auth_manager.next_state(
+        match self.auth_manager.next_local_state(
             context.source_connection_id(),
-            AuthorizationAction::Challenge(ChallengeAuthorizationAction::AddingNonce {
-                nonce: nonce_request.nonce,
-            }),
+            AuthorizationLocalAction::Challenge(
+                ChallengeAuthorizationLocalAction::ReceiveAuthChallengeNonceResponse,
+            ),
         ) {
             Err(err) => {
                 warn!(
@@ -761,9 +873,9 @@ impl Handler for AuthChallengeNonceResponseHandler {
                     err
                 );
             }
-            Ok(AuthorizationState::Challenge(ChallengeAuthorizationState::NonceSent {
-                ..
-            })) => {
+            Ok(AuthorizationLocalState::Challenge(
+                ChallengeAuthorizationLocalState::ReceivedAuthChallengeNonceResponse,
+            )) => {
                 let auth_msg =
                     AuthorizationMessage::AuthChallengeSubmitRequest(AuthChallengeSubmitRequest {
                         submit_requests,
@@ -772,6 +884,22 @@ impl Handler for AuthChallengeNonceResponseHandler {
                 let msg_bytes = IntoBytes::<network::NetworkMessage>::into_bytes(
                     NetworkMessage::from(auth_msg),
                 )?;
+
+                if self
+                    .auth_manager
+                    .next_local_state(
+                        context.source_connection_id(),
+                        AuthorizationLocalAction::Challenge(
+                            ChallengeAuthorizationLocalAction::SendAuthChallengeSubmitRequest,
+                        ),
+                    )
+                    .is_err()
+                {
+                    error!(
+                        "Unable to transition from ReceivedAuthChallengeNonceResponse to \
+                        WaitingForAuthChallengSubmitResponse"
+                    )
+                };
 
                 sender
                     .send(context.source_id().clone(), msg_bytes)
@@ -868,7 +996,7 @@ impl Handler for AuthChallengeSubmitRequestHandler {
                     .auth_manager
                     .next_remote_state(
                         context.source_connection_id(),
-                        AuthorizationAction::Unauthorizing,
+                        AuthorizationRemoteAction::Unauthorizing,
                     )
                     .is_err()
                 {
@@ -907,7 +1035,7 @@ impl Handler for AuthChallengeSubmitRequestHandler {
                     .auth_manager
                     .next_remote_state(
                         context.source_connection_id(),
-                        AuthorizationAction::Unauthorizing,
+                        AuthorizationRemoteAction::Unauthorizing,
                     )
                     .is_err()
                 {
@@ -948,7 +1076,7 @@ impl Handler for AuthChallengeSubmitRequestHandler {
                 .auth_manager
                 .next_remote_state(
                     context.source_connection_id(),
-                    AuthorizationAction::Unauthorizing,
+                    AuthorizationRemoteAction::Unauthorizing,
                 )
                 .is_err()
             {
@@ -963,9 +1091,13 @@ impl Handler for AuthChallengeSubmitRequestHandler {
 
         match self.auth_manager.next_remote_state(
             context.source_connection_id(),
-            AuthorizationAction::Challenge(ChallengeAuthorizationAction::Submitting {
-                public_key: identity.clone(),
-            }),
+            AuthorizationRemoteAction::Challenge(
+                ChallengeAuthorizationRemoteAction::ReceiveAuthChallengeSubmitRequest(
+                    Identity::Challenge {
+                        public_key: identity.clone(),
+                    },
+                ),
+            ),
         ) {
             Err(err) => {
                 warn!(
@@ -974,9 +1106,9 @@ impl Handler for AuthChallengeSubmitRequestHandler {
                     err
                 );
             }
-            Ok(AuthorizationState::Challenge(ChallengeAuthorizationState::Identified {
-                ..
-            })) => {
+            Ok(AuthorizationRemoteState::Challenge(
+                ChallengeAuthorizationRemoteState::ReceivedAuthChallengeSubmitRequest(_),
+            )) => {
                 let auth_msg =
                     AuthorizationMessage::AuthChallengeSubmitResponse(AuthChallengeSubmitResponse);
 
@@ -997,21 +1129,14 @@ impl Handler for AuthChallengeSubmitRequestHandler {
             .auth_manager
             .next_remote_state(
                 context.source_connection_id(),
-                AuthorizationAction::Challenge(ChallengeAuthorizationAction::Authorizing),
+                AuthorizationRemoteAction::Challenge(
+                    ChallengeAuthorizationRemoteAction::SendAuthChallengeSubmitResponse,
+                ),
             )
             .is_err()
         {
-            error!("Unable to transition from TrustIdentified to Authorized")
+            error!("Unable to transition from ReceivedAuthChallengSubmitRequest to Done")
         };
-
-        let auth_msg = AuthorizationMessage::AuthComplete(AuthComplete);
-        let msg_bytes =
-            IntoBytes::<network::NetworkMessage>::into_bytes(NetworkMessage::from(auth_msg))?;
-        sender
-            .send(context.source_id().clone(), msg_bytes)
-            .map_err(|(recipient, payload)| {
-                DispatchError::NetworkSendError((recipient.into(), payload))
-            })?;
 
         Ok(())
     }
@@ -1021,19 +1146,12 @@ impl Handler for AuthChallengeSubmitRequestHandler {
 #[cfg(feature = "challenge-authorization")]
 pub struct AuthChallengeSubmitResponseHandler {
     auth_manager: AuthorizationManagerStateMachine,
-    public_key: Option<Vec<u8>>,
 }
 
 #[cfg(feature = "challenge-authorization")]
 impl AuthChallengeSubmitResponseHandler {
-    pub fn new(
-        auth_manager: AuthorizationManagerStateMachine,
-        public_key: Option<Vec<u8>>,
-    ) -> Self {
-        Self {
-            auth_manager,
-            public_key,
-        }
+    pub fn new(auth_manager: AuthorizationManagerStateMachine) -> Self {
+        Self { auth_manager }
     }
 }
 
@@ -1051,28 +1169,18 @@ impl Handler for AuthChallengeSubmitResponseHandler {
         &self,
         _msg: Self::Message,
         context: &MessageContext<Self::Source, Self::MessageType>,
-        _sender: &dyn MessageSender<Self::Source>,
+        sender: &dyn MessageSender<Self::Source>,
     ) -> Result<(), DispatchError> {
         debug!(
             "Received authorization challenge submit response from {}",
             context.source_connection_id()
         );
 
-        let public_key = self
-            .public_key
-            .as_ref()
-            .ok_or_else(|| {
-                DispatchError::HandleError(
-                    "Received authorization challenge submit response without configured \
-                    local public key"
-                        .to_string(),
-                )
-            })?
-            .clone();
-
-        match self.auth_manager.next_state(
+        match self.auth_manager.next_local_state(
             context.source_connection_id(),
-            AuthorizationAction::Challenge(ChallengeAuthorizationAction::Submitting { public_key }),
+            AuthorizationLocalAction::Challenge(
+                ChallengeAuthorizationLocalAction::ReceiveAuthChallengeSubmitResponse,
+            ),
         ) {
             Err(err) => {
                 warn!(
@@ -1081,9 +1189,35 @@ impl Handler for AuthChallengeSubmitResponseHandler {
                     err
                 );
             }
-            Ok(AuthorizationState::Challenge(ChallengeAuthorizationState::Identified {
-                ..
-            })) => (),
+            Ok(AuthorizationLocalState::Authorized) => {
+                let auth_msg = AuthorizationMessage::AuthComplete(AuthComplete);
+                let msg_bytes = IntoBytes::<network::NetworkMessage>::into_bytes(
+                    NetworkMessage::from(auth_msg),
+                )?;
+                sender
+                    .send(context.source_id().clone(), msg_bytes)
+                    .map_err(|(recipient, payload)| {
+                        DispatchError::NetworkSendError((recipient.into(), payload))
+                    })?;
+
+                match self.auth_manager.next_local_state(
+                    context.source_connection_id(),
+                    AuthorizationLocalAction::SendAuthComplete,
+                ) {
+                    Err(err) => {
+                        warn!(
+                            "Cannot transition connection from Authorized {}: {}",
+                            context.source_connection_id(),
+                            err
+                        );
+                    }
+                    Ok(AuthorizationLocalState::WaitForComplete) => (),
+                    Ok(AuthorizationLocalState::AuthorizedAndComplete) => (),
+                    Ok(next_state) => {
+                        panic!("Should not have been able to transition to {}", next_state)
+                    }
+                };
+            }
             Ok(next_state) => panic!("Should not have been able to transition to {}", next_state),
         };
         Ok(())
@@ -1120,10 +1254,11 @@ impl Handler for AuthCompleteHandler {
             "Received authorization complete from {}",
             context.source_connection_id()
         );
-        match self.auth_manager.next_state(
-            context.source_connection_id(),
-            AuthorizationAction::Authorizing,
-        ) {
+
+        match self
+            .auth_manager
+            .received_complete(context.source_connection_id())
+        {
             Err(err) => {
                 warn!(
                     "Ignoring authorization complete message from connection {}: {}",
@@ -1131,14 +1266,7 @@ impl Handler for AuthCompleteHandler {
                     err
                 );
             }
-            #[cfg(feature = "trust-authorization")]
-            Ok(AuthorizationState::Trust(TrustAuthorizationState::Authorized(_))) => (),
-            #[cfg(feature = "challenge-authorization")]
-            Ok(AuthorizationState::Challenge(ChallengeAuthorizationState::Authorized {
-                ..
-            })) => (),
-            Ok(AuthorizationState::AuthComplete(_)) => (),
-            Ok(next_state) => panic!("Should not have been able to transition to {}", next_state),
+            Ok(()) => (),
         }
 
         Ok(())

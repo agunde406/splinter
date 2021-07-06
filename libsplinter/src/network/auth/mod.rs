@@ -22,7 +22,7 @@ use std::fmt;
 use std::sync::{mpsc, Arc, Mutex};
 
 #[cfg(feature = "challenge-authorization")]
-use cylinder::{Signer, SigningError, VerifierFactory};
+use cylinder::{Signer, VerifierFactory};
 use protobuf::Message;
 
 #[cfg(feature = "trust-authorization")]
@@ -40,8 +40,9 @@ use crate::transport::{Connection, RecvError};
 use self::handlers::create_authorization_dispatcher;
 use self::pool::{ThreadPool, ThreadPoolBuilder};
 pub(crate) use self::state_machine::{
-    AuthorizationAction, AuthorizationActionError, AuthorizationManagerStateMachine,
-    AuthorizationState, Identity,
+    AuthorizationActionError, AuthorizationLocalAction, AuthorizationLocalState,
+    AuthorizationManagerStateMachine, AuthorizationRemoteAction, AuthorizationRemoteState,
+    Identity,
 };
 
 const AUTHORIZATION_THREAD_POOL_SIZE: usize = 8;
@@ -51,10 +52,13 @@ const AUTHORIZATION_THREAD_POOL_SIZE: usize = 8;
 /// separately.
 #[derive(Debug, Clone)]
 pub(crate) struct ManagedAuthorizationState {
-    // Local node state
-    local_state: AuthorizationState,
+    // Local node state while authorizing with remote node
+    local_state: AuthorizationLocalState,
     // Remote node state
-    remote_state: AuthorizationState,
+    remote_state: AuthorizationRemoteState,
+
+    // Tracks whether the local node has completed authorization with the remote node
+    received_complete: bool,
 }
 
 #[derive(Debug)]
@@ -73,8 +77,6 @@ pub struct AuthorizationManager {
     local_identity: String,
     #[cfg(feature = "challenge-authorization")]
     signers: Vec<Box<dyn Signer>>,
-    #[cfg(feature = "challenge-authorization")]
-    public_keys: Vec<Vec<u8>>,
     thread_pool: ThreadPool,
     shared: Arc<Mutex<ManagedAuthorizations>>,
     #[cfg(feature = "challenge-authorization")]
@@ -98,21 +100,10 @@ impl AuthorizationManager {
 
         let shared = Arc::new(Mutex::new(ManagedAuthorizations::new()));
 
-        #[cfg(feature = "challenge-authorization")]
-        let public_keys = signers
-            .iter()
-            .map(|signer| Ok(signer.public_key()?.into_bytes()))
-            .collect::<Result<Vec<Vec<u8>>, SigningError>>()
-            .map_err(|_| {
-                AuthorizationManagerError("Unable to get public keys from signers".to_string())
-            })?;
-
         Ok(Self {
             local_identity,
             #[cfg(feature = "challenge-authorization")]
             signers,
-            #[cfg(feature = "challenge-authorization")]
-            public_keys,
             thread_pool,
             shared,
             #[cfg(feature = "challenge-authorization")]
@@ -139,8 +130,6 @@ impl AuthorizationManager {
             executor: self.thread_pool.executor(),
             #[cfg(feature = "challenge-authorization")]
             verifier_factory: self.verifier_factory.clone(),
-            #[cfg(feature = "challenge-authorization")]
-            public_keys: self.public_keys.clone(),
         }
     }
 }
@@ -166,8 +155,6 @@ pub struct AuthorizationConnector {
     executor: pool::JobExecutor,
     #[cfg(feature = "challenge-authorization")]
     verifier_factory: Arc<Mutex<Box<dyn VerifierFactory>>>,
-    #[cfg(feature = "challenge-authorization")]
-    public_keys: Vec<Vec<u8>>,
 }
 
 impl AuthorizationConnector {
@@ -204,7 +191,7 @@ impl AuthorizationConnector {
             self.local_identity.clone(),
             #[cfg(feature = "challenge-authorization")]
             self.signers.clone(),
-            state_machine,
+            state_machine.clone(),
             msg_sender,
             #[cfg(feature = "challenge-authorization")]
             nonce,
@@ -214,15 +201,15 @@ impl AuthorizationConnector {
             local_authorization.clone(),
             #[cfg(feature = "challenge-authorization")]
             verifier,
-            #[cfg(feature = "challenge-authorization")]
-            self.public_keys.clone(),
         )
         .map_err(|err| {
             AuthorizationManagerError(format!("Unable to setup authorization dispatcher: {}", err))
         })?;
 
         self.executor.execute(move || {
-            #[cfg(not(feature = "trust-authorization"))]
+            #[cfg(not(any(
+                feature = "trust-authorization",
+                feature = "challenge-authorization")))]
             {
                 let connect_request_bytes = match connect_msg_bytes() {
                     Ok(bytes) => bytes,
@@ -243,7 +230,7 @@ impl AuthorizationConnector {
                 }
             }
 
-            #[cfg(feature = "trust-authorization")]
+            #[cfg(any(feature = "trust-authorization", feature = "challenge-authorization"))]
             {
                 let protocol_request_bytes = match protocol_msg_bytes() {
                     Ok(bytes) => bytes,
@@ -262,6 +249,19 @@ impl AuthorizationConnector {
                     );
                     return;
                 }
+
+                if state_machine
+                    .next_local_state(
+                        &connection_id,
+                        AuthorizationLocalAction::SendAuthProtocolRequest,
+                    )
+                    .is_err()
+                {
+                    error!(
+                        "Unable to update state from Start to WaitingForAuthProtocolResponse for {}",
+                        &connection_id,
+                    )
+                };
             }
 
             let authed_identity = 'main: loop {
@@ -414,11 +414,7 @@ impl ManagedAuthorizations {
     fn take_connection_identity(&mut self, connection_id: &str) -> Option<Identity> {
         self.states.remove(connection_id).and_then(|managed_state| {
             match managed_state.remote_state {
-                AuthorizationState::AuthComplete(Some(identity)) => Some(identity),
-                AuthorizationState::AuthComplete(None) => match managed_state.local_state {
-                    AuthorizationState::AuthComplete(Some(identity)) => Some(identity),
-                    _ => None,
-                },
+                AuthorizationRemoteState::Done(identity) => Some(identity),
                 _ => None,
             }
         })
@@ -429,11 +425,11 @@ impl ManagedAuthorizations {
             matches!(
                 (&managed_state.local_state, &managed_state.remote_state),
                 (
-                    AuthorizationState::AuthComplete(_),
-                    AuthorizationState::AuthComplete(_)
+                    AuthorizationLocalState::AuthorizedAndComplete,
+                    AuthorizationRemoteState::Done(_),
                 ) | (
-                    AuthorizationState::Unauthorized,
-                    AuthorizationState::Unauthorized
+                    AuthorizationLocalState::Unauthorized,
+                    AuthorizationRemoteState::Unauthorized
                 )
             )
         })
